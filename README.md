@@ -4,15 +4,19 @@
 
 Netgear R7000 / Merlin 380 的 AnyTLS 增强：设备自身 TUN 旁路、UU 游戏加速与视频代理共存、可配置连接参数，以及 Google / YouTube / Telegram HTTPS 状态面板。
 
-当前增强版本：**4.38.3-r7000.3**。
+当前运行增强版本：**4.38.3-r7000.3**；完整离线包版本：**4.38.3-r7000.3-full.1**。
 
-**已有 cary-sas Fancyss 4.38.3 的兼容设备，可以直接下载通用离线增强包，无需编译：**
+**首次安装可直接下载完整离线包，一次上传，无需先装原版 4.38.3，也无需编译：**
 
-- [下载 shadowsocks.tar.gz](https://github.com/hjh006/router-playground/releases/download/v4.38.3-r7000.3/shadowsocks.tar.gz)
-- [下载 SHA256SUMS 校验文件](https://github.com/hjh006/router-playground/releases/download/v4.38.3-r7000.3/SHA256SUMS)
-- [版本说明与依赖许可证](https://github.com/hjh006/router-playground/releases/tag/v4.38.3-r7000.3)
+- [完整离线包 shadowsocks.tar.gz](https://github.com/hjh006/router-playground/releases/download/v4.38.3-r7000.3-full.1/shadowsocks.tar.gz)
+- [SHA256SUMS 校验文件](https://github.com/hjh006/router-playground/releases/download/v4.38.3-r7000.3-full.1/SHA256SUMS)
+- [完整包版本说明](https://github.com/hjh006/router-playground/releases/tag/v4.38.3-r7000.3-full.1)
 
-**这是 4.38.3 的增量增强包，不是所有路由器都能首次安装的完整包。** 先核对第 1 节环境；尚未安装基线的设备，按第 3 节先装匹配的上游 4.38.3，再装增强包。GitHub 的 Code → Download ZIP 是源码，不能直接上传安装。上游材料的许可范围见[来源说明](THIRD_PARTY_NOTICES.md)。
+完整包适用于下述 R7000 / Koolshare Merlin 380 环境，不是路由器固件，也不是所有路由器通用包。新安装会装好运行依赖、网页和增强组件，保持代理关闭；之后只需填入自己的节点再启用。已有匹配 4.38.3 的设备会转入增强更新流程，保留原有配置；其他插件版本会拒绝覆盖。
+
+这是首个完整包预发布版：首次安装入口已通过沙箱验证，尚未在独立空白 R7000 上完成首装实机验收；其中 AnyTLS 运行增强组件此前已在 R7000 实机使用验证。
+
+已有 4.38.3 的用户也可选[体积更小的旧增量包](https://github.com/hjh006/router-playground/releases/tag/v4.38.3-r7000.3)。GitHub 的 Code → Download ZIP 是源码，不是安装包。第三方内容范围见[来源说明](THIRD_PARTY_NOTICES.md)。
 
 ## 阅读顺序
 
@@ -25,7 +29,7 @@ Netgear R7000 / Merlin 380 的 AnyTLS 增强：设备自身 TUN 旁路、UU 游�
 7. [看懂检测面板与验收](#7-看懂检测面板与验收)
 8. [常见问题与恢复](#8-常见问题与恢复)
 
-普通用户阅读第 1 节后，下载 Releases 的 `shadowsocks.tar.gz`，从第 3 节开始；想自行编译或修改源码的用户再阅读第 2 节。通用包不含节点、订阅或个人设备配置，升级会保留安装者自己的现有配置。
+普通用户阅读第 1 节后，下载完整包 Releases 的 `shadowsocks.tar.gz`，从第 3 节开始；想自行编译或修改源码的用户再阅读第 2 节。通用包不含节点、订阅或个人设备配置，升级会保留安装者自己的现有配置。
 
 ## 1. 确认设备与准备材料
 
@@ -36,7 +40,8 @@ Netgear R7000 / Merlin 380 的 AnyTLS 增强：设备自身 TUN 旁路、UU 游�
 | 路由器 | Netgear R7000 |
 | 固件 | 含 Koolshare 软件中心的 Merlin `380.70_0-X7.9.1` |
 | 内核 / 架构 | Linux `2.6.36.4` / `armv7l` |
-| 插件基线 | cary-sas 的 Fancyss **4.38.3** |
+| 首次安装 | 无需预装插件；完整包内含匹配的 4.38.3 运行文件与增强组件 |
+| 已有插件 | 支持匹配的 cary-sas Fancyss 4.38.3；其他版本先按上游方法迁移 |
 | 共存设备网络 | 主 LAN `br0` 下的 IPv4 设备 |
 
 本项目不是路由器固件，也不是 OpenWrt、原厂 R7000 固件或 Merlin 386/388 的通用插件。没有软件中心的设备，需要先自行准备匹配固件；本文不包含刷机教程。上游列出的其他机型不代表本增强版已逐一实测。
@@ -142,17 +147,37 @@ python3 build/r7000-enhanced/build-enhancement.py
 
 默认 `build/` 已存在时会拒绝覆盖。重新准备可选新目录，例如 `--dest build/retry`，然后运行脚本打印出的构建命令；产物会放在该目标目录的 `r7000-update-generic/` 下。无需删除自己的旧产物或配置。
 
+### 2.6 自行构建完整包（可选）
+
+普通下载用户跳过此节。完整包使用第 2.5 节准备好的工作树，并需要四份来源 / 许可材料；这些文件只用于随包附带说明，不涉及设备配置。
+
+```sh
+mkdir -p downloads/full-notices
+cp LICENSE THIRD_PARTY_NOTICES.md downloads/full-notices/
+curl -fL https://github.com/hjh006/router-playground/releases/download/v4.38.3-r7000.3/MPL-2.0.txt \
+  -o downloads/full-notices/MPL-2.0.txt
+curl -fL https://github.com/hjh006/router-playground/releases/download/v4.38.3-r7000.3/third-party-licenses.tar.gz \
+  -o downloads/full-notices/third-party-licenses.tar.gz
+python3 build/r7000-enhanced/build-full.py --notices downloads/full-notices
+```
+
+生成：`build/r7000-full-generic/shadowsocks.tar.gz`。如果准备工作树使用了其他 `--dest`，按实际目录调整 `build-full.py` 路径。完整包只从校验过的原版包和公开增强代码生成，不从运行中的路由器导出文件、节点或 DBus 配置。
+
 ## 3. 在路由器上安装
 
 ### 3.1 区分当前状态
 
-- **已经安装 cary-sas 4.38.3**：直接安装增强包，不重复安装原版。
-- **兼容固件上还没有插件**：从[上游 v4.38.3 发布页](https://github.com/cary-sas/v2ray_bin/releases/tag/v4.38.3)的 Assets 下载原版 `shadowsocks.tar.gz`，通过软件中心离线安装，确认基线 4.38.3；首次配置前保持代理关闭，再安装本项目的增强包。全新搭建时，完成增强安装后再安装或启用 UU。两个包同名但来源不同，不要传错。
-- **已有其他版本、其他分支或其他固件**：本教程不提供原地跨版本迁移，先按相应上游方法备份和迁移，不能直接覆盖增强增量包。
+| 当前设备状态 | 下载和操作 |
+| --- | --- |
+| 已有兼容固件和软件中心，尚未装科学上网插件 | 下载上方完整包，一次上传即可；不需要先安装原版 |
+| 已安装匹配的 cary-sas 4.38.3 / 增强 r3 | 完整包会使用增强更新器；也可继续用旧增量包 |
+| 已有其他版本 / 分支、残留不完整安装或其他固件 | 完整包会拒绝直接覆盖，先备份并按相应上游方法迁移或恢复 |
 
-原版旧入口可能影响 UU 的共享规则；已运行 UU 的 4.38.3 用户应直接走增强更新，不要为此反复重装、启停原版。
+首次安装不调用原版清理脚本，不启停 UU，不修改共享 DNS 钩子；只安装清单中的文件、建立必要链接和注册软件中心。新安装的代理保持关闭，两组 MAC 与 Hosts 为空，规则 / 订阅自动更新关闭，不创建示例节点。安装器记录可能覆盖的共享文件与设置，并为失败回滚保留私有备份。
 
-### 3.2 上传增强包
+完整包在已有 4.38.3 上走原有安全增强更新器，不重新铺装全部基线文件；它保留已有启用状态和配置，自动更新选项仍需按第 4 节核对。
+
+### 3.2 上传安装包
 
 下载后，在安装包所在文件夹运行对应的校验命令，将输出与 `SHA256SUMS` 中 `shadowsocks.tar.gz` 那行比对：
 
@@ -166,12 +191,12 @@ python3 build/r7000-enhanced/build-enhancement.py
 
 1. 电脑保持连接该路由器的局域网，登录路由器管理页。
 2. 打开 **软件中心 → 离线安装**。
-3. 选择从 **本项目 Releases** 下载的 **`shadowsocks.tar.gz`**，点 **上传并安装**。自行构建的用户选择 `build/r7000-update-generic/shadowsocks.tar.gz`。保持文件名，不解压后逐个上传；不要选择 GitHub 自动生成的 Source code 包。
-4. 等日志结束，确认出现 `Enhancement installed`，记录打印的私有备份目录。
+3. 选择从 **完整包 Releases** 下载的 **`shadowsocks.tar.gz`**，点 **上传并安装**。自行构建完整包的用户选择 `build/r7000-full-generic/shadowsocks.tar.gz`。保持文件名，不解压后逐个上传；不要选择 GitHub 自动生成的 Source code 包。
+4. 等日志结束：首次安装确认出现 `Full installation completed (proxy disabled)`；已有 4.38.3 的增强更新确认 `Enhancement installed`。记录打印的私有备份目录。
 5. 返回科学上网插件并刷新；缓存旧资源时强制刷新或重新登录后再查看。
 6. 确认页头出现 **R7000 增强 r3**，能看到新的 HTTPS 面板和“访问控制”中的两组设备策略。
 
-原插件版本数字仍可能显示 **4.38.3**，增强标记在页头。安装器保留原来的启用状态：之前关闭的不会自动开启，之前运行的会尝试用新入口恢复。节点和设备名单需继续配置。
+原插件版本数字仍可能显示 **4.38.3**，增强标记在页头。首次安装后代理关闭，需要添加自己的节点；已有 4.38.3 更新会保留原启用状态：之前关闭的不会自动开启，之前运行的会尝试用新入口恢复。设备名单按自己的情况配置。
 
 日志没有成功标记时，先处理具体失败项，不要把“上传完成”当成“安装完成”，也不要连续重复安装。
 
@@ -245,9 +270,9 @@ Hosts 只改节点连接目标，**保留原节点 SNI**：手填 SNI 时以手�
 2. 在节点订阅设置中选 **禁用订阅计划任务**，点 **仅保存设置**；需要立刻获取节点时用 **保存并订阅**。
 3. 重新打开页面，确认两项都已关闭。
 
-**通用增强安装器保留已有自动更新设置，不会替每个使用者自动关闭它们。**
+**完整包首次安装会关闭这两项；已有 4.38.3 的增强更新保留原设置，所以仍应重新打开页面核对。**
 
-原版“检查并更新”可能覆盖增强文件；增强版升级应使用对应增强包。不要为了套用 Clash 教程，顺手改动电脑 TUN、全局 IPv6 或路由器 DNS 劫持。
+完整包首次安装会把旧在线更新入口改为离线更新提示；已有安装中的原版“检查并更新”仍可能覆盖增强文件。后续统一通过本项目 Releases 下载匹配的离线包更新。不要为了套用 Clash 教程，顺手改动电脑 TUN、全局 IPv6 或路由器 DNS 劫持。
 
 ### 4.4 启用与首次检查
 
@@ -338,7 +363,8 @@ Google / YouTube 使用轻量连通性地址，Telegram 使用 HTTPS 头请求�
 | `Base archive SHA256 does not match` | 是否下载 v4.38.3 的 Assets 安装包、是否完整；不要修改校验值绕过检查 |
 | `Destination already exists` | 给 `--dest` 指定新目录，运行脚本打印的构建命令 |
 | 补丁失败 / clone 目录已存在 | 是否在新目录按固定提交准备；不要重复应用补丁 |
-| `An installed fancyss 4.38.3 is required` | 这是增量包，先核对插件来源与基线版本 |
+| `An installed fancyss 4.38.3 is required` | 很可能误下载了旧增量包；首次安装应选本文顶部的完整包 |
+| `Unrecognized plugin` / 存在旧节点或不完整注册 | 安装器不会把残留状态当作全新设备，先保留配置并按上游方法迁移或恢复 |
 | 二进制无法运行、缺少 helper 或空间不足 | 看预检日志，核对架构、Go 版本与空间，不跳过预检强行覆盖 |
 | 无增强标记 / 新面板 | 确认上传增强包且安装成功，再强制刷新缓存 |
 | 手机可用、路由器不通 | 核对节点、SNI、证书选项、必需 Hosts、启动前直接解析；YAML DNS / 规则不自动迁移 |
@@ -352,7 +378,7 @@ Google / YouTube 使用轻量连通性地址，Telegram 使用 HTTPS 头请求�
 
 ### 安装失败和手动恢复
 
-日志会给出本次目录：`/jffs/.r7000-backups/<本次目录>/`。备份含私有参数，不要上传 GitHub 或公开贴出。
+日志会给出本次目录：首次完整安装在 `/jffs/.r7000-full-backups/<本次目录>/`，已有 4.38.3 的增强更新在 `/jffs/.r7000-backups/<本次目录>/`。备份含私有参数，不要上传 GitHub 或公开贴出。
 
 - 预检失败先修日志指出的问题。已触及服务后失败时，安装器会尝试恢复文件和参数，并**保持路由器代理关闭**；不能只看旧文件回来就认定服务恢复。
 - 手动恢复前，先用**增强版安全入口**停止代理，再按该备份的 `RESTORE.txt` 执行 `restore-files.sh`。这需要路由器管理 / SSH 操作经验，不确定时保留备份和脱敏日志再排查。
@@ -385,8 +411,8 @@ node tests/ss-health.test.js
 
 客户端完整测试在应用补丁后的上游工作树内执行 `go test ./...`；并发验证可用 `go test -race ./cmd/client ./proxy/session`。
 
-本版本曾在上述 R7000 上通过 94 项 Python 检查与 JS 界面验证，三站短期检测 16/16 轮完整通过，PS5 视频与 UU 游戏通过用户实测。结果仅对应该窗口与配置，不构成其他网络或长期可用性保证。
+完整包首次安装入口经过模拟路由器文件系统与 DBus 的自动化验证，尚未在独立空白 R7000 上完成首次安装实机验收；没有为此清空用户正在使用的路由器。其运行增强组件此前在上述 R7000 上通过 94 项 Python 检查与 JS 界面验证，三站短期检测 16/16 轮完整通过，PS5 视频与 UU 游戏通过用户实测。结果仅对应该窗口与配置，不构成其他网络或长期可用性保证。
 
-原创新增内容用 [MIT License](LICENSE)。第三方文件和补丁上游上下文不因此获得新许可，详见[来源与许可说明](THIRD_PARTY_NOTICES.md)。源码仓库保留补丁；Releases 分发通用增强增量包，包含必要的修改版客户端、插件文件及公共 CA bundle。第三方内容保留其原有权利，发布本身不构成额外授权。
+原创新增内容用 [MIT License](LICENSE)。第三方文件和补丁上游上下文不因此获得新许可，详见[来源与许可说明](THIRD_PARTY_NOTICES.md)。源码仓库保留补丁；Releases 分发完整离线包及增强增量包，包含各自必需的修改版客户端、插件文件、运行依赖及公共 CA bundle。第三方内容保留其原有权利，发布本身不构成额外授权。
 
 本地维护仓库、下载材料、构建产物和实机资料均在忽略目录中。不要把订阅、密码、真实 MAC、私有 Hosts、实机日志或未脱敏截图加入公开提交。发布包会清除构建电脑的用户名、属主 ID、时间戳和扩展元数据；它不包含本地私有部署包装层。

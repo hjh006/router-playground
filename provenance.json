@@ -38,5 +38,15 @@
     "contains_derived_plugin_files": true,
     "includes_user_settings": false,
     "archive_metadata_normalized": true
+  },
+  "full_release_assets": {
+    "tag": "v4.38.3-r7000.3-full.1",
+    "package_sha256": "82fa8edacf39ca1174a5002fd35e61a3c2fd3866fd980b068d3a109596bdac3d",
+    "package_bytes": 29960982,
+    "fresh_file_count": 95,
+    "includes_user_settings": false,
+    "archive_metadata_normalized": true,
+    "fresh_install_validation": "16 sandbox cases + actual 95-file tree integration with host-only ARM preflight shims; independent review",
+    "blank_hardware_fresh_install_verified": false
   }
 }
