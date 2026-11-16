@@ -1,0 +1,10 @@
+/build/
+__pycache__/
+*.pyc
+*.apk
+*.idsig
+*.p12
+*.jks
+*.keystore
+signing-password
+local.properties

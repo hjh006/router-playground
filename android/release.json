@@ -1,0 +1,20 @@
+{
+  "name": "自用路由线路",
+  "version": "1.1.0",
+  "package": "cn.simon.routercontrol",
+  "tag": "android-v1.1.0",
+  "apk": "router-control-1.1.0.apk",
+  "sha256": "6f2f117a50006babcfa1baccb542b0cf73e0b90f099596f7bad6f36b49b2a123",
+  "min_android_api": 26,
+  "compile_sdk": "android-36.1",
+  "target_sdk": 35,
+  "checks": {
+    "router_api": 86,
+    "tcp_hosts": 22,
+    "country_groups": 17,
+    "post_restore_preservation": 23
+  },
+  "acceptance_scope": "Fresh login, saved-line round trip and TCP timing verified on Android 17 with enhanced R7000 r3. Active UU game traffic was not exercised.",
+  "private_settings_included": false,
+  "signing_private_key_included": false
+}

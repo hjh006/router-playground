@@ -20,3 +20,10 @@
 /build-client/
 /build-tools/
 /downloads/
+# Android outputs and signing material stay outside public source.
+/android/build/
+*.p12
+*.jks
+*.keystore
+signing-password
+local.properties

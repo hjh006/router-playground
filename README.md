@@ -18,6 +18,16 @@ Netgear R7000 / Merlin 380 的 AnyTLS 增强：设备自身 TUN 旁路、UU 游�
 
 已有 4.38.3 的用户也可选[体积更小的旧增量包](https://github.com/hjh006/router-playground/releases/tag/v4.38.3-r7000.3)。GitHub 的 Code → Download ZIP 是源码，不是安装包。第三方内容范围见[来源说明](THIRD_PARTY_NOTICES.md)。
 
+## Android App：自用路由线路
+
+<img src="android/res/drawable-nodpi/ic_launcher_imagegen.png" width="72" alt="自用路由线路 App 图标">
+
+[下载 Android 1.1.0 APK](https://github.com/hjh006/router-playground/releases/download/android-v1.1.0/router-control-1.1.0.apk) · [版本与校验文件](https://github.com/hjh006/router-playground/releases/tag/android-v1.1.0) · [源码与构建说明](android/README.md)
+
+用手机连接已经配置好的 R7000 增强 r3，读取并切换已有 AnyTLS 线路。支持国家/地区和国旗分组、双列线路卡片，以及手动测量手机 TCP 入口延迟；当前线路的路由器 HTTPS 检测单独显示。App 使用 Android 原生界面，需要 Android 8.0 或更新版本。
+
+管理地址、账号和线路来自使用者自己的路由器；公开源码和 APK 不附带账号、节点、MAC、服务商 Hosts 或签名私钥。App 不创建手机 VPN，也不替代路由器插件安装包。切换保留现有 UU、旁路、DNS 和自动更新设置；检测数据代表短期采样，活动游戏流量需在自己的环境验收。
+
 ## 阅读顺序
 
 1. [确认设备与准备材料](#1-确认设备与准备材料)
@@ -28,6 +38,7 @@ Netgear R7000 / Merlin 380 的 AnyTLS 增强：设备自身 TUN 旁路、UU 游�
 6. [配置 PS5 / UU 共存](#6-配置-ps5--uu-共存)
 7. [看懂检测面板与验收](#7-看懂检测面板与验收)
 8. [常见问题与恢复](#8-常见问题与恢复)
+9. [用 Android App 切换线路](android/README.md)
 
 普通用户阅读第 1 节后，下载完整包 Releases 的 `shadowsocks.tar.gz`，从第 3 节开始；想自行编译或修改源码的用户再阅读第 2 节。通用包不含节点、订阅或个人设备配置，升级会保留安装者自己的现有配置。
 

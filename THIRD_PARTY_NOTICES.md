@@ -11,5 +11,7 @@
 - CA bundle 来源为 [curl CA Extract](https://curl.se/docs/caextract.html) 从 Mozilla certdata 提取的证书数据，适用 [Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/)。Releases 包含该 CA bundle，保留其原始来源头部，另附 MPL-2.0 全文；源码仓库记录已验收快照的哈希。
 - Go 标准库适用 [Go BSD 许可](https://go.dev/LICENSE)。`runtime-tools/` 仅使用标准库；本仓库不分发 Go 工具链。
 - 新图标是本项目生成的资源；实际设备截图、账号配置和私有服务商资料不包含在公开仓库中。
+- `android/` 是独立的原生 Java 管理客户端，应用代码和构建脚本适用本项目原创内容的许可范围。APK 只包含该应用的代码与生成图标，不捆绑路由器插件、AnyTLS 内核、Android SDK 或 JDK；Android 平台 API 与运行库由设备系统提供。
+- Android 的 JVM 合成测试由使用者另外提供 `org.json:json:20240303` 测试 JAR；该 JAR 不包含在 APK、仓库或 Android 源码发布包中，其自身许可继续适用。
 
 Releases 的发布不改变第三方代码的许可状态，也不表示已取得上游额外授权。第三方组件不适用本仓库的 MIT 授权。重建或再次分发时，应保留上游已有版权和许可说明，核对相应材料的适用条件；这里的源码许可不构成对上游安装包或协议实现的重新授权。
