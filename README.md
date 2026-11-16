@@ -6,7 +6,13 @@ Netgear R7000 / Merlin 380 的 AnyTLS 增强：设备自身 TUN 旁路、UU 游�
 
 当前增强版本：**4.38.3-r7000.3**。
 
-**先看安装方式：本仓库目前提供源码、补丁和构建方法，没有可直接下载的增强安装包。** GitHub 的 **Code → Download ZIP** 下载的是源码，不能上传到路由器安装。需要先在电脑上构建，再把生成的 `shadowsocks.tar.gz` 上传到软件中心。上游材料的许可范围见[来源说明](THIRD_PARTY_NOTICES.md)。
+**已有 cary-sas Fancyss 4.38.3 的兼容设备，可以直接下载通用离线增强包，无需编译：**
+
+- [下载 shadowsocks.tar.gz](https://github.com/hjh006/router-playground/releases/download/v4.38.3-r7000.3/shadowsocks.tar.gz)
+- [下载 SHA256SUMS 校验文件](https://github.com/hjh006/router-playground/releases/download/v4.38.3-r7000.3/SHA256SUMS)
+- [版本说明与依赖许可证](https://github.com/hjh006/router-playground/releases/tag/v4.38.3-r7000.3)
+
+**这是 4.38.3 的增量增强包，不是所有路由器都能首次安装的完整包。** 先核对第 1 节环境；尚未安装基线的设备，按第 3 节先装匹配的上游 4.38.3，再装增强包。GitHub 的 Code → Download ZIP 是源码，不能直接上传安装。上游材料的许可范围见[来源说明](THIRD_PARTY_NOTICES.md)。
 
 ## 阅读顺序
 
@@ -19,7 +25,7 @@ Netgear R7000 / Merlin 380 的 AnyTLS 增强：设备自身 TUN 旁路、UU 游�
 7. [看懂检测面板与验收](#7-看懂检测面板与验收)
 8. [常见问题与恢复](#8-常见问题与恢复)
 
-已有自行构建的增强包，可从第 3 节开始；第一次使用本仓库，请按顺序操作。
+普通用户阅读第 1 节后，下载 Releases 的 `shadowsocks.tar.gz`，从第 3 节开始；想自行编译或修改源码的用户再阅读第 2 节。通用包不含节点、订阅或个人设备配置，升级会保留安装者自己的现有配置。
 
 ## 1. 确认设备与准备材料
 
@@ -37,11 +43,12 @@ Netgear R7000 / Merlin 380 的 AnyTLS 增强：设备自身 TUN 旁路、UU 游�
 
 ### 需要准备
 
-- 构建电脑：下面使用 macOS / Linux 终端命令；Windows 可在 WSL2 的 Linux 环境操作。**编译在电脑上进行，不在路由器上进行。**
-- Python **3.8 或更新版本**、Git、`patch`、curl，以及 **Go 1.23.12**。Node.js 仅用于可选的界面测试。
+- 普通安装只需一台能登录路由器管理页、下载并上传安装包的电脑和浏览器，不需要编译工具链。
 - 自己的 AnyTLS 地址、端口、密码、SNI 和证书要求；服务商有节点 Hosts 映射时也一并准备。
 - 路由器管理权限，使用自己的 LAN 网关地址登录，本文不固定管理 IP。
 - 需要 UU 共存时，准备路由器上能正常工作的 UU 后台插件，以及目标设备当前接口的 MAC。
+
+只有自行构建才需要 macOS / Linux 终端（Windows 可用 WSL2）、Python 3.8+、Git、`patch`、curl 和 Go 1.23.12；Node.js 仅用于可选界面测试。编译在电脑上进行，不在路由器上进行。
 
 先备份现有节点配置、访问控制和路由器设置。本文不需要修改电脑自身的 VPN/TUN、全局 IPv6 或全局 DNS。
 
@@ -140,16 +147,26 @@ python3 build/r7000-enhanced/build-enhancement.py
 ### 3.1 区分当前状态
 
 - **已经安装 cary-sas 4.38.3**：直接安装增强包，不重复安装原版。
-- **兼容固件上还没有插件**：先通过软件中心安装 `downloads/shadowsocks.tar.gz`，确认基线 4.38.3；首次配置前保持代理关闭，再安装增强包。全新搭建时，完成增强安装后再安装或启用 UU。
+- **兼容固件上还没有插件**：从[上游 v4.38.3 发布页](https://github.com/cary-sas/v2ray_bin/releases/tag/v4.38.3)的 Assets 下载原版 `shadowsocks.tar.gz`，通过软件中心离线安装，确认基线 4.38.3；首次配置前保持代理关闭，再安装本项目的增强包。全新搭建时，完成增强安装后再安装或启用 UU。两个包同名但来源不同，不要传错。
 - **已有其他版本、其他分支或其他固件**：本教程不提供原地跨版本迁移，先按相应上游方法备份和迁移，不能直接覆盖增强增量包。
 
 原版旧入口可能影响 UU 的共享规则；已运行 UU 的 4.38.3 用户应直接走增强更新，不要为此反复重装、启停原版。
 
 ### 3.2 上传增强包
 
+下载后，在安装包所在文件夹运行对应的校验命令，将输出与 `SHA256SUMS` 中 `shadowsocks.tar.gz` 那行比对：
+
+| 电脑系统 | 校验命令 |
+| --- | --- |
+| macOS | `shasum -a 256 shadowsocks.tar.gz` |
+| Linux | `sha256sum shadowsocks.tar.gz` |
+| Windows PowerShell | `Get-FileHash .\shadowsocks.tar.gz -Algorithm SHA256` |
+
+哈希一致后再安装；依赖许可证与第三方来源说明附在同一版本的 Releases 资产中。
+
 1. 电脑保持连接该路由器的局域网，登录路由器管理页。
 2. 打开 **软件中心 → 离线安装**。
-3. 选择电脑上 **`build/r7000-update-generic/shadowsocks.tar.gz`**，点 **上传并安装**。保持文件名 `shadowsocks.tar.gz`，不要解压后逐个上传。
+3. 选择从 **本项目 Releases** 下载的 **`shadowsocks.tar.gz`**，点 **上传并安装**。自行构建的用户选择 `build/r7000-update-generic/shadowsocks.tar.gz`。保持文件名，不解压后逐个上传；不要选择 GitHub 自动生成的 Source code 包。
 4. 等日志结束，确认出现 `Enhancement installed`，记录打印的私有备份目录。
 5. 返回科学上网插件并刷新；缓存旧资源时强制刷新或重新登录后再查看。
 6. 确认页头出现 **R7000 增强 r3**，能看到新的 HTTPS 面板和“访问控制”中的两组设备策略。
@@ -370,6 +387,6 @@ node tests/ss-health.test.js
 
 本版本曾在上述 R7000 上通过 94 项 Python 检查与 JS 界面验证，三站短期检测 16/16 轮完整通过，PS5 视频与 UU 游戏通过用户实测。结果仅对应该窗口与配置，不构成其他网络或长期可用性保证。
 
-原创新增内容用 [MIT License](LICENSE)。第三方文件和补丁上游上下文不因此获得新许可，详见[来源与许可说明](THIRD_PARTY_NOTICES.md)。完整上游源码、预编译客户端、安装包和 CA bundle 不在本仓库重复分发。使用者自行取得材料并遵守其适用条件。
+原创新增内容用 [MIT License](LICENSE)。第三方文件和补丁上游上下文不因此获得新许可，详见[来源与许可说明](THIRD_PARTY_NOTICES.md)。源码仓库保留补丁；Releases 分发通用增强增量包，包含必要的修改版客户端、插件文件及公共 CA bundle。第三方内容保留其原有权利，发布本身不构成额外授权。
 
-本地维护仓库、下载材料、构建产物和实机资料均在忽略目录中。不要把订阅、密码、真实 MAC、私有 Hosts、实机日志或未脱敏截图加入公开提交。
+本地维护仓库、下载材料、构建产物和实机资料均在忽略目录中。不要把订阅、密码、真实 MAC、私有 Hosts、实机日志或未脱敏截图加入公开提交。发布包会清除构建电脑的用户名、属主 ID、时间戳和扩展元数据；它不包含本地私有部署包装层。

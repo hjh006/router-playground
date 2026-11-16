@@ -28,6 +28,15 @@
     "license": "MPL-2.0",
     "snapshot": "2026-11-05",
     "sha256": "427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285",
-    "distributed_here": false
+    "distributed_here": true
+  },
+  "release_assets": {
+    "tag": "v4.38.3-r7000.3",
+    "package_sha256": "ccb8e9ebcd0312c515de4d934241b0065267158119e8de415c0ce8ca3367c13c",
+    "package_bytes": 3850129,
+    "contains_modified_client_binary": true,
+    "contains_derived_plugin_files": true,
+    "includes_user_settings": false,
+    "archive_metadata_normalized": true
   }
 }

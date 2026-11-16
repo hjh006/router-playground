@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build the private deployment and generic update from an explicit file list."""
 import argparse
+import gzip
 import hashlib
 import json
 import shutil
@@ -19,6 +20,14 @@ FILES = [
     'ss/rules/cacert.pem.sha256', 'webs/Main_Ss_Content.asp',
     'res/ss-health.js', 'res/ss-health.css', 'res/icon-shadowsocks.png',
 ]
+
+def archive_metadata(item):
+    """Keep local usernames, IDs, timestamps and extended metadata out of packages."""
+    item.uid = item.gid = 0
+    item.uname = item.gname = ''
+    item.mtime = 0
+    item.pax_headers = {}
+    return item
 
 def build(private=False):
     label = 'private' if private else 'generic'
@@ -68,8 +77,10 @@ def build(private=False):
             '--migration=phone-insecure\n')
         (package/'install.sh').chmod(0o755)
     archive = stage/'shadowsocks.tar.gz'
-    with tarfile.open(archive, 'w:gz') as tar:
-        tar.add(package, arcname='shadowsocks', filter=lambda item: item)
+    with archive.open('wb') as raw:
+        with gzip.GzipFile(filename='', mode='wb', fileobj=raw, mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode='w') as tar:
+                tar.add(package, arcname='shadowsocks', filter=archive_metadata)
     archive.chmod(0o600 if private else 0o644)
     print(json.dumps({'package': str(archive), 'bytes': archive.stat().st_size,
                       'sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
