@@ -1,0 +1,197 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>R7000 状态界面预览</title><link rel="stylesheet" href="../shadowsocks/res/ss-health.css"><style>
+body{margin:0;background:#263238;color:#f4f7f8;font:14px/1.6 Arial,sans-serif}.preview{max-width:760px;margin:32px auto;padding:0 18px}.preview h1{font-size:20px;margin:0 0 6px}.preview-note{color:#d2dce0;margin:0 0 16px}.preview-control{margin:0 0 18px}.preview-control select,.preview-button{padding:8px 12px;background:#40545d;border:1px solid #82949b;border-radius:3px;color:#fff;font:inherit}.FormTable{border-collapse:collapse;background:#4b5d64;color:#f4f7f8}.FormTable th{padding:12px;background:#394a51;text-align:left}.FormTable td{border:1px solid #6b8fa3}.ss_btn{border:1px solid #222;border-radius:5px;background:linear-gradient(to bottom,#03434b,#10252b);color:#fff;font-size:13px}.ss_btn:hover{background:#17677e}.preview h2{font-size:16px;margin:24px 0 10px}.preview-button{min-height:44px;margin-top:8px;cursor:pointer}@media(max-width:700px){.preview{margin:20px auto;padding:0 12px}.preview h1{font-size:18px}}
+</style><script src="../shadowsocks/res/ss-health.js"></script></head><body><main class="preview"><h1><img src="../shadowsocks/res/icon-shadowsocks.png" width="32" height="32" alt="" style="vertical-align:middle;margin-right:8px">连接状态与设备策略</h1><p class="preview-note">以下是模拟数据，仅用于界面布局和状态验证，不代表路由器实际检测。</p><div class="preview-control"><label for="preview_state">预览状态 </label><select id="preview_state"><option value="healthy">正常</option><option value="sampling">首次采样</option><option value="degraded">部分目标失败</option><option value="down">连续检测失败</option><option value="stale">数据过期</option><option value="disabled">代理关闭</option><option value="error">状态读取失败</option></select></div><div id="ss_status1">
+                                            <table width="100%" border="1" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable">
+                                                <tr id="ss_state">
+                                                    <td colspan="2" class="ss-health-cell">
+                                                        <div id="ss_health" class="ss-health ss-health-checking">
+                                                            <div class="ss-health-head">
+                                                                <div class="ss-health-heading">
+                                                                    <strong id="ss_health_title" class="ss-health-title" role="status" aria-live="polite" aria-atomic="true">等待检测</strong>
+                                                                    <a id="mode_state" class="ss-health-mode" href="javascript:void(0);">运行状态</a>
+                                                                    <div class="ss-health-context"><span id="ss_health_node"></span><span id="ss_health_time" class="ss-health-time"></span></div>
+                                                                </div>
+                                                                <div class="ss-health-actions">
+                                                                    <a class="ss_btn" href="javascript:void(0);" onclick="pop_111(3)">分流检测</a>
+                                                                    <a class="ss_btn" href="javascript:void(0);" onclick="get_proc_status(3)">详细状态</a>
+                                                                </div>
+                                                            </div>
+                                                            <div class="ss-health-metrics">
+                                                                <div class="ss-health-metric"><span class="ss-health-metric-label">最近 HTTPS 延迟</span><span id="ss_health_latency" class="ss-health-metric-value">—</span><span id="ss_health_median" class="ss-health-median"></span></div>
+                                                                <div class="ss-health-metric"><span id="ss_health_rate_label" class="ss-health-metric-label">完整通过率</span><span id="ss_health_success" class="ss-health-metric-value">—</span><span id="ss_health_sample_count" class="ss-health-sample-count">等待采样</span></div>
+                                                                <div class="ss-health-metric"><span class="ss-health-metric-label">P95 延迟</span><span id="ss_health_p95" class="ss-health-metric-value">—</span></div>
+                                                                <div class="ss-health-metric"><span class="ss-health-metric-label">延迟波动</span><span id="ss_health_jitter" class="ss-health-metric-value">—</span></div>
+                                                            </div>
+                                                            <div id="ss_health_targets" class="ss-health-targets"></div>
+                                                            <p id="ss_health_note" class="ss-health-note">首次采样完成后显示连接状态。</p>
+                                                            <p class="ss-health-scope">检测从路由器发起；设备自身 VPN 与 UU 加速的状态不在此统计中。</p>
+                                                        </div>
+                                                        <div id="ss_health_legacy" class="ss-health-legacy">
+                                                            <span id="ss_health_legacy_label" class="ss-health-legacy-label">旧版单次 HTTP 检测，仅供参考</span>
+                                                            <span id="ss_health_legacy_foreign"><span id="ss_state2">国外检测等待采样</span><br /></span>
+                                                            <span id="ss_state3">国内检测等待采样</span>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            </table>
+                                        </div>
+										<h2>访问控制</h2><table width="100%" border="1" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable ss-device-policy">
+                                                <tr>
+                                                    <th scope="row"><label for="ss_basic_bypass_macs">自带 VPN 设备旁路</label></th>
+                                                    <td>
+                                                        <textarea id="ss_basic_bypass_macs" name="ss_basic_bypass_macs" rows="3" maxlength="4096" placeholder="AA:BB:CC:DD:EE:FF" aria-describedby="ss_bypass_help ss_bypass_error" autocomplete="off" autocapitalize="off" spellcheck="false" oninput="clearBypassError();"></textarea>
+                                                        <p id="ss_bypass_help" class="ss-device-policy-help">列出的设备保留原有 TCP 与 DNS 路径，交给设备自身 VPN 处理。每行一个 MAC 地址，也可用逗号分隔，最多 32 个；留空则不旁路设备。保存并应用后生效。</p>
+                                                        <p class="ss-device-policy-help">关闭设备自身的 TUN / VPN 后，需要移除此旁路，才能使用路由器代理。此设置不会关闭设备自身的 VPN。</p>
+                                                        <p id="ss_bypass_error" class="ss-device-policy-error" role="alert"></p>
+                                                    </td>
+                                                </tr>
+                                            </table>
+											<table width="100%" border="1" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable ss-device-policy">
+                                                <tr>
+                                                    <th scope="row"><label for="ss_basic_uu_macs">PS5 / UU 共存设备</label></th>
+                                                    <td>
+                                                        <textarea id="ss_basic_uu_macs" name="ss_basic_uu_macs" rows="3" maxlength="4096" placeholder="AA:BB:CC:DD:EE:FF" aria-describedby="ss_uu_help ss_uu_error" autocomplete="off" autocapitalize="off" spellcheck="false" oninput="clearBypassError();"></textarea>
+                                                        <p id="ss_uu_help" class="ss-device-policy-help">游戏加速规则优先；其余境外 IPv4 TCP（如 YouTube）走路由器代理。UDP 由 UU 或原网络处理，DNS 沿用 UU 与路由器的现有规则。</p>
+                                                        <p class="ss-device-policy-help">每行一个 MAC 地址，也可用逗号分隔，最多 32 个。每台设备只选择一种策略，请勿与上方旁路列表重复。保存并应用后生效。</p>
+                                                        <p id="ss_uu_error" class="ss-device-policy-error" role="alert"></p>
+                                                    </td>
+                                                </tr>
+                                            </table>
+											<button class="preview-button" type="button" onclick="validateBypassDevices()">验证 MAC 输入</button><h2>全局设定</h2><div class="ss-advanced" id="ss_anytls_advanced">
+                                                <input type="button" id="ss_anytls_advanced_toggle" class="ss-advanced-toggle" value="AnyTLS 高级连接设置 · 展开" aria-expanded="false" aria-controls="ss_anytls_advanced_body" onclick="toggleAdvancedSection('anytls');" />
+                                                <div id="ss_anytls_advanced_body" style="display:none;">
+                                                    <p id="ss_anytls_advanced_help" class="ss-advanced-help">仅对 AnyTLS 节点生效，保存并应用后重新连接。证书校验沿用节点本身的设置。</p>
+                                                    <table width="100%" border="1" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable ss-advanced-table">
+                                                        <tr><th scope="row"><label for="ss_basic_anytls_min_idle">最少空闲连接</label></th><td><input type="text" id="ss_basic_anytls_min_idle" name="ss_basic_anytls_min_idle" class="input_ss_table ss-advanced-number" value="0" maxlength="2" inputmode="numeric" aria-describedby="ss_anytls_advanced_help ss_anytls_advanced_error" oninput="clearAdvancedError('anytls');" /> <span class="ss-advanced-unit">个 · 0–20</span><p class="ss-advanced-help">设为 0 可减少常驻连接与内存占用。</p></td></tr>
+                                                        <tr><th scope="row"><label for="ss_basic_anytls_idle_check">空闲连接检查间隔</label></th><td><input type="text" id="ss_basic_anytls_idle_check" name="ss_basic_anytls_idle_check" class="input_ss_table ss-advanced-number" value="30" maxlength="3" inputmode="numeric" aria-describedby="ss_anytls_advanced_help ss_anytls_advanced_error" oninput="clearAdvancedError('anytls');" /> <span class="ss-advanced-unit">秒 · 5–300</span></td></tr>
+                                                        <tr><th scope="row"><label for="ss_basic_anytls_idle_timeout">空闲连接回收时间</label></th><td><input type="text" id="ss_basic_anytls_idle_timeout" name="ss_basic_anytls_idle_timeout" class="input_ss_table ss-advanced-number" value="30" maxlength="3" inputmode="numeric" aria-describedby="ss_anytls_advanced_help ss_anytls_advanced_error" oninput="clearAdvancedError('anytls');" /> <span class="ss-advanced-unit">秒 · 5–600</span></td></tr>
+                                                        <tr><th scope="row"><label for="ss_basic_anytls_handshake">握手超时</label></th><td><input type="text" id="ss_basic_anytls_handshake" name="ss_basic_anytls_handshake" class="input_ss_table ss-advanced-number" value="8" maxlength="2" inputmode="numeric" aria-describedby="ss_anytls_advanced_help ss_anytls_advanced_error" oninput="clearAdvancedError('anytls');" /> <span class="ss-advanced-unit">秒 · 3–20</span></td></tr>
+                                                        <tr><th scope="row"><label for="ss_basic_anytls_alpn">ALPN 协商协议</label></th><td><input type="text" id="ss_basic_anytls_alpn" name="ss_basic_anytls_alpn" class="input_ss_table ss-advanced-alpn" value="h2" maxlength="64" placeholder="留空自动协商" aria-describedby="ss_anytls_alpn_help ss_anytls_advanced_error" autocomplete="off" spellcheck="false" oninput="clearAdvancedError('anytls');" /><p id="ss_anytls_alpn_help" class="ss-advanced-help">支持 h2、http/1.1，可用逗号分隔；留空使用自动协商。</p></td></tr>
+                                                        <tr><th scope="row"><label for="ss_basic_anytls_fingerprint">TLS 指纹</label></th><td><select id="ss_basic_anytls_fingerprint" name="ss_basic_anytls_fingerprint" class="input_option" aria-describedby="ss_anytls_advanced_help ss_anytls_advanced_error" onchange="clearAdvancedError('anytls');"><option value="chrome" selected="selected">Chrome</option><option value="standard">标准 TLS</option></select></td></tr>
+                                                        <tr><th scope="row"><label for="ss_basic_anytls_hosts">服务商 Hosts 映射（节点解析）</label></th><td><div class="ss-device-policy"><textarea id="ss_basic_anytls_hosts" name="ss_basic_anytls_hosts" rows="3" maxlength="16384" placeholder="node.example.com=connect.example.com" aria-describedby="ss_anytls_hosts_help ss_anytls_advanced_error" autocomplete="off" autocapitalize="off" spellcheck="false" oninput="clearAdvancedError('anytls');"></textarea></div><p id="ss_anytls_hosts_help" class="ss-advanced-help">每行 原域名=目标域名或IPv4，也可用逗号分隔，最多 32 条。使用 ASCII 域名；来源也支持 IPv4。重复来源须指向同一目标，映射链最多 4 跳。</p><p class="ss-advanced-help">仅替换 AnyTLS 节点的连接目标，保留节点 SNI。留空使用节点原地址；此设置不修改设备自身 VPN / TUN 或全局 DNS。</p></td></tr>
+                                                    </table>
+                                                    <p id="ss_anytls_advanced_error" class="ss-device-policy-error" role="alert"></p>
+                                                </div>
+                                            </div><h2>附加功能</h2><div class="ss-advanced" id="ss_health_advanced">
+                                                <input type="button" id="ss_health_advanced_toggle" class="ss-advanced-toggle" value="健康检测设置 · 展开" aria-expanded="false" aria-controls="ss_health_advanced_body" onclick="toggleAdvancedSection('health');" />
+                                                <div id="ss_health_advanced_body" style="display:none;">
+                                                    <p id="ss_health_advanced_help" class="ss-advanced-help">调整路由器的 HTTPS 检测频率与失败判定。更短的间隔会增加检测流量；此处不控制 UU 或设备自身 VPN。保存并应用后生效。</p>
+                                                    <table width="100%" border="1" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable ss-advanced-table">
+                                                        <tr><th scope="row"><label for="ss_basic_health_interval">检测间隔</label></th><td><select id="ss_basic_health_interval" name="ss_basic_health_interval" class="input_option" aria-describedby="ss_health_advanced_help ss_health_advanced_error" onchange="clearAdvancedError('health');"><option value="30" selected="selected">30 秒</option><option value="60">60 秒</option><option value="120">120 秒</option></select></td></tr>
+                                                        <tr><th scope="row"><label for="ss_basic_health_timeout">单目标超时</label></th><td><select id="ss_basic_health_timeout" name="ss_basic_health_timeout" class="input_option" aria-describedby="ss_health_advanced_help ss_health_advanced_error" onchange="clearAdvancedError('health');"><option value="6">6 秒</option><option value="8">8 秒</option><option value="10" selected="selected">10 秒</option></select></td></tr>
+                                                        <tr><th scope="row"><label for="ss_basic_health_failures">连续失败判定次数</label></th><td><input type="text" id="ss_basic_health_failures" name="ss_basic_health_failures" class="input_ss_table ss-advanced-number" value="3" maxlength="1" inputmode="numeric" aria-describedby="ss_health_failures_help ss_health_advanced_error" oninput="clearAdvancedError('health');" /> <span class="ss-advanced-unit">轮 · 1–5</span><p id="ss_health_failures_help" class="ss-advanced-help">所有目标连续未通过达到此次数时，显示连接检测失败；部分目标未通过时显示连接波动。</p></td></tr>
+                                                    </table>
+                                                    <p id="ss_health_advanced_error" class="ss-device-policy-error" role="alert"></p>
+                                                </div>
+                                            </div><button class="preview-button" type="button" onclick="previewValidateAdvanced()">验证高级设置</button><p id="preview_config_result" class="preview-note" role="status"></p></main><script>
+function E(id){return document.getElementById(id);}
+function pop_111(){return false;}
+function get_proc_status(){return false;}
+function clearBypassError() {
+	E("ss_bypass_error").innerHTML = "";
+	E("ss_uu_error").innerHTML = "";
+	E("ss_basic_bypass_macs").removeAttribute("aria-invalid");
+	E("ss_basic_uu_macs").removeAttribute("aria-invalid");
+}
+
+function validateBypassDevices() {
+	var field = E("ss_basic_bypass_macs");
+	var uuField = E("ss_basic_uu_macs");
+	clearBypassError();
+	if (typeof SsHealth === "undefined") {
+		E("ss_bypass_error").appendChild(document.createTextNode("设备旁路验证组件未载入，请刷新页面后重试。"));
+		return false;
+	}
+	var result = SsHealth.normalizePolicies(field.value, uuField.value);
+	if (!result.valid) {
+		var invalidField = E(result.field);
+		var errorId = result.field === "ss_basic_uu_macs" ? "ss_uu_error" : "ss_bypass_error";
+		E(errorId).appendChild(document.createTextNode(result.error));
+		invalidField.setAttribute("aria-invalid", "true");
+		if (E("tablet_5") && E("tablet_5").style.display === "none") { $("#show_btn5").trigger("click"); }
+		invalidField.focus();
+		return false;
+	}
+	field.value = result.bypass;
+	uuField.value = result.uu;
+	return true;
+}
+
+function loadAdvancedSettings(config) {
+	if (typeof SsHealth === "undefined") { return; }
+	var defaults = SsHealth.advancedDefaults;
+	for (var key in defaults) {
+		if (!defaults.hasOwnProperty(key)) { continue; }
+		var value = config[key];
+		if (typeof value === "undefined" || value === "") { value = defaults[key]; }
+		if (key === "ss_basic_anytls_hosts") { value = String(value).replace(/,/g, "\n"); }
+		E(key).value = key === "ss_basic_anytls_alpn" && value === "auto" ? "" : value;
+	}
+}
+
+function setAdvancedSection(group, expanded) {
+	E("ss_" + group + "_advanced_body").style.display = expanded ? "" : "none";
+	var button = E("ss_" + group + "_advanced_toggle");
+	button.setAttribute("aria-expanded", expanded ? "true" : "false");
+	button.value = (group === "anytls" ? "AnyTLS 高级连接设置" : "健康检测设置") + (expanded ? " · 收起" : " · 展开");
+}
+
+function toggleAdvancedSection(group) {
+	setAdvancedSection(group, E("ss_" + group + "_advanced_body").style.display === "none");
+}
+
+function clearAdvancedError(group) {
+	E("ss_" + group + "_advanced_error").innerHTML = "";
+	var fields = E("ss_" + group + "_advanced_body").getElementsByTagName("input");
+	var selects = E("ss_" + group + "_advanced_body").getElementsByTagName("select");
+	var textareas = E("ss_" + group + "_advanced_body").getElementsByTagName("textarea");
+	var i;
+	for (i = 0; i < fields.length; i++) { fields[i].removeAttribute("aria-invalid"); }
+	for (i = 0; i < selects.length; i++) { selects[i].removeAttribute("aria-invalid"); }
+	for (i = 0; i < textareas.length; i++) { textareas[i].removeAttribute("aria-invalid"); }
+}
+
+function validateAdvancedSettings() {
+	clearAdvancedError("anytls");
+	clearAdvancedError("health");
+	if (typeof SsHealth === "undefined") {
+		alert("设置验证组件未载入，请刷新页面后重试。");
+		return null;
+	}
+	var values = {};
+	for (var key in SsHealth.advancedDefaults) {
+		if (SsHealth.advancedDefaults.hasOwnProperty(key)) { values[key] = E(key).value; }
+	}
+	var result = SsHealth.normalizeAdvanced(values);
+	if (!result.valid) {
+		var group = result.field.indexOf("ss_basic_health_") === 0 ? "health" : "anytls";
+		$(group === "health" ? "#show_btn6" : "#show_btn2").trigger("click");
+		setAdvancedSection(group, true);
+		E("ss_" + group + "_advanced_error").appendChild(document.createTextNode(result.error));
+		E(result.field).setAttribute("aria-invalid", "true");
+		E(result.field).focus();
+		return null;
+	}
+	return result.values;
+}
+
+function previewValidateAdvanced(){
+ var result=validateAdvancedSettings();
+ E('preview_config_result').textContent=result?'验证通过；此预览不会向路由器提交任何设置。':'';
+}
+window.$=function(){return {trigger:function(){}};};
+loadAdvancedSettings({});
+var currentState='healthy';
+window.jQuery={ajax:function(options){
+ if(currentState==='error'){options.error();options.complete();return;}
+ var now=Math.floor(new Date().getTime()/1000);
+ var sample={version:1,enabled:true,node_id:'35',checked_at:now,interval_sec:30,status:'healthy',total:20,success:20,last_latency_ms:312,median_ms:287,p95_ms:746,jitter_ms:92,consecutive_failures:0,targets:[{id:'google',state:'ok',latency_ms:264,http_code:204},{id:'youtube',state:'ok',latency_ms:312,http_code:200},{id:'telegram',state:'ok',latency_ms:386,http_code:200}]};
+ if(currentState==='sampling'){sample.total=1;sample.success=1;}
+ if(currentState==='degraded'){sample.status='degraded';sample.success=18;sample.targets[2]={id:'telegram',state:'timeout',latency_ms:null,http_code:0};}
+ if(currentState==='down'){sample.status='down';sample.success=15;sample.consecutive_failures=3;sample.targets.forEach(function(t){t.state='network_error';t.latency_ms=null;});}
+ if(currentState==='stale'){sample.checked_at=now-360;}
+ options.success(sample);options.complete();
+}};
+SsHealth.start({enabled:true,nodeId:'35',nodeLabel:'示例日本节点'});SsHealth.refresh(true);
+E('preview_state').onchange=function(){currentState=this.value;SsHealth.refresh(currentState!=='disabled');};
+</script></body></html>

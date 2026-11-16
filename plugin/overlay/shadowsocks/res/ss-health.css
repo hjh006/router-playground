@@ -1,0 +1,67 @@
+.ss-health-plugin-icon { display: inline-block; margin-right: 9px; vertical-align: middle; }
+.ss-health-cell { padding: 12px !important; }
+.ss-health { color: #f4f7f8; font-size: 13px; line-height: 1.5; }
+.ss-health-head { display: table; width: 100%; margin-bottom: 8px; }
+.ss-health-heading { display: table-cell; vertical-align: top; }
+.ss-health-title { font-size: 15px; font-weight: bold; }
+.ss-health-title:before { content: ""; display: inline-block; width: 8px; height: 8px; margin: 0 7px 1px 0; border: 1px solid currentColor; border-radius: 50%; vertical-align: middle; background: currentColor; }
+.ss-health-healthy .ss-health-title { color: #b3efd7; }
+.ss-health-degraded .ss-health-title { color: #ffe0a3; }
+.ss-health-down .ss-health-title { color: #ffd0d0; }
+.ss-health-stale .ss-health-title, .ss-health-unavailable .ss-health-title, .ss-health-disabled .ss-health-title { color: #e0e6e9; }
+.ss-health-time { display: inline-block; margin-left: 10px; color: #d2dce0; font-size: 12px; }
+.ss-health-context { margin-top: 3px; color: #e0e8eb; font-size: 12px; }
+.ss-health-mode { display: inline-block; margin-left: 10px; color: #c7e3ef; font-size: 12px; text-decoration: underline; }
+.ss-health-metrics { display: table; width: 100%; margin: 8px 0; table-layout: fixed; }
+.ss-health-metric { display: table-cell; padding-right: 8px; vertical-align: top; }
+.ss-health-metric-label { display: block; color: #d2dce0; font-size: 12px; }
+.ss-health-metric-value { display: block; margin-top: 2px; font-size: 15px; font-weight: bold; font-variant-numeric: tabular-nums; }
+.ss-health-sample-count { display: block; margin-top: 2px; color: #d2dce0; font-size: 12px; }
+.ss-health-targets { margin: 6px 0; color: #e2eaed; font-size: 12px; }
+.ss-health-target { display: inline-block; margin: 0 15px 4px 0; }
+.ss-health-target-name { color: #f4f7f8; }
+.ss-health-note { margin: 6px 0 0; color: #e0e8eb; font-size: 12px; }
+.ss-health-scope { margin: 4px 0 0; color: #d2dce0; font-size: 12px; }
+.ss-health-median { display: inline-block; margin: 4px 0 0; color: #d2dce0; font-size: 12px; }
+.ss-health-legacy { margin-top: 8px; color: #d2dce0; font-size: 12px; line-height: 1.6; }
+.ss-health-legacy-label { display: block; font-size: 12px; }
+.ss-health-actions { display: table-cell; padding-left: 12px; text-align: right; vertical-align: top; white-space: nowrap; }
+.ss-health-actions .ss_btn { display: inline-block; box-sizing: border-box; width: auto; min-width: 88px; min-height: 44px; margin: 0 0 0 6px; padding: 12px 10px; text-align: center; line-height: 18px; text-decoration: none; }
+.ss-health-actions .ss_btn:focus, .ss-health-mode:focus, .ss-device-policy textarea:focus { outline: 2px solid #9edcff; outline-offset: 2px; }
+.ss-health-disabled .ss-health-metrics { display: none; }
+.ss-device-policy { margin-bottom: 10px; }
+.ss-device-policy th { width: 30%; }
+.ss-device-policy td { padding: 12px !important; }
+.ss-device-policy label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: bold; }
+.ss-device-policy textarea { box-sizing: border-box; width: 100%; min-height: 72px; padding: 7px 9px; border: 1px solid #82949b; border-radius: 3px; background: #36464d; color: #f4f7f8; font: 13px/1.5 "Lucida Console", monospace; resize: vertical; }
+.ss-device-policy textarea[aria-invalid="true"] { border-color: #ffd0d0; }
+.ss-device-policy-help { margin: 6px 0 0; color: #e0e8eb; font-size: 12px; line-height: 1.6; }
+.ss-device-policy-error { margin: 6px 0 0; color: #ffd0d0; font-size: 12px; line-height: 1.5; }
+.ss-advanced { margin: 0 0 10px; padding: 0 12px 8px; border: 1px solid #6b8fa3; background: #4b5d64; color: #f4f7f8; }
+.ss-advanced-toggle { box-sizing: border-box; width: 100%; min-height: 44px; margin: 0; padding: 10px 0; border: 0; background: transparent; color: #f4f7f8; text-align: left; font: bold 13px/1.6 Arial, sans-serif; cursor: pointer; }
+.ss-advanced-toggle:hover { color: #c7e3ef; }
+.ss-advanced-help, .ss-advanced-unit { margin: 4px 0 8px; color: #e0e8eb; font-size: 12px; line-height: 1.6; }
+.ss-advanced-table { margin: 8px 0 0 !important; }
+.ss-advanced-table th { width: 35%; }
+.ss-advanced-table td { padding: 9px 12px !important; }
+.ss-advanced-table label { font-size: 13px; }
+.ss-advanced-table input, .ss-advanced-table select { box-sizing: border-box; min-height: 32px; padding: 4px 7px; border: 1px solid #82949b; border-radius: 3px; background: #36464d; color: #f4f7f8; font-size: 13px; }
+.ss-advanced-table .ss-advanced-number { width: 66px; }
+.ss-advanced-table .ss-advanced-alpn { width: 100%; max-width: 240px; }
+.ss-advanced-toggle:focus, .ss-advanced-table input:focus, .ss-advanced-table select:focus { outline: 2px solid #9edcff; outline-offset: 2px; }
+.ss-advanced-table [aria-invalid="true"] { border-color: #ffd0d0; }
+@media (max-width: 700px) {
+    .ss-health-head, .ss-health-heading, .ss-health-actions { display: block; }
+    .ss-health-actions { margin-top: 8px; padding-left: 0; text-align: left; white-space: normal; }
+    .ss-health-actions .ss_btn { margin: 0 6px 6px 0; }
+    .ss-health-metrics { display: block; font-size: 0; }
+    .ss-health-metric { display: inline-block; box-sizing: border-box; width: 50%; margin-bottom: 8px; font-size: 13px; }
+    .ss-health-time { display: block; margin: 4px 0 0; }
+}
+@media (max-width: 600px) {
+    .ss-device-policy, .ss-device-policy tbody, .ss-device-policy tr, .ss-advanced-table, .ss-advanced-table tbody, .ss-advanced-table tr { display: block; width: 100%; box-sizing: border-box; }
+    .ss-device-policy th, .ss-device-policy td, .ss-advanced-table th, .ss-advanced-table td { display: block; box-sizing: border-box; width: auto !important; }
+    .ss-device-policy th, .ss-advanced-table th { padding: 10px 12px !important; text-align: left; }
+    .ss-device-policy th label { margin-bottom: 0; }
+    .ss-advanced-table input, .ss-advanced-table select { min-height: 44px; }
+}

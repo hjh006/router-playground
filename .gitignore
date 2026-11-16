@@ -1,0 +1,21 @@
+# Local maintenance repositories, state and deployment evidence
+/work/
+/outputs/
+/docs/project-organization-check.json
+/project.json
+/README.txt
+/AGENTS.md
+/docs/R7000-使用说明.txt
+# Local-only reconstructed upstream sources and packages
+/build/
+/private/
+**/.git/
+**/.serena/
+**/.tools/
+**/.gocache/
+**/.gomodcache/
+**/__pycache__/
+**/*.pyc
+.DS_Store
+/build-client/
+/build-tools/

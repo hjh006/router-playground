@@ -1,0 +1,3 @@
+# Patch context indentation is data; preserve it exactly.
+*.patch -whitespace
+*.png binary

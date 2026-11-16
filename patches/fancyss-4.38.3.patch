@@ -1,0 +1,970 @@
+diff --git a/shadowsocks/scripts/ss_webtest.sh b/shadowsocks/scripts/ss_webtest.sh
+index 29eca8b..050fcf5 100755
+--- a/shadowsocks/scripts/ss_webtest.sh
++++ b/shadowsocks/scripts/ss_webtest.sh
+@@ -41,13 +41,17 @@ speed_test_curl(){
+ 	curl_probe() {
+ 		local tag="$1"
+ 		local timeout_sec="$2"
++		local probe_metrics=""
++		local probe_rc=""
+ 
+-		curl -k -A "$agent" -I "$latency_test_url" -o /dev/null \
++		probe_metrics=$(curl --cacert /koolshare/ss/rules/cacert.pem -A "$agent" -I "$latency_test_url" -o /dev/null \
+ 			--socks5-hostname ${proxy_host}:${proxy_port} \
+ 			--connect-timeout "$timeout_sec" \
+ 			--max-time "$timeout_sec" \
+-			--write-out "${tag}|%{exitcode}|%{http_code}|%{time_total}\n" \
+-			-s 2>/dev/null
++			--write-out "%{http_code}|%{time_total}" \
++			-s 2>/dev/null)
++		probe_rc=$?
++		printf '%s|%s|%s\n' "$tag" "$probe_rc" "$probe_metrics"
+ 	}
+ 
+ 	parse_probe_ms() {
+@@ -962,9 +966,9 @@ start_webtest(){
+ 
+ 		elif [ "$array12" == "4" -a "$array14" == "AnyTLS" ];then   #AnyTLS
+ 			if [ -n "$(eval echo \$ssconf_basic_trojan_sni_$nu)" ]; then
+-				anytls -socks 127.0.0.1:23458 -nat 0.0.0.0:3334 -s "${array1}:${array2}" -p "$array3" -sni "$(eval echo \$ssconf_basic_trojan_sni_$nu)" >/dev/null 2>&1 &
++				SS_ANYTLS_INSECURE="$(dbus get ssconf_basic_allowinsecure_$nu)" /koolshare/scripts/ss_anytls.sh -socks 127.0.0.1:23458 -nat 127.0.0.1:3334 -s "${array1}:${array2}" -p "$array3" -sni "$(eval echo \$ssconf_basic_trojan_sni_$nu)" >/dev/null 2>&1 &
+ 			else
+-				anytls -socks 127.0.0.1:23458 -nat 0.0.0.0:3334 -s "${array1}:${array2}" -p "$array3" >/dev/null 2>&1 &
++				SS_ANYTLS_INSECURE="$(dbus get ssconf_basic_allowinsecure_$nu)" /koolshare/scripts/ss_anytls.sh -socks 127.0.0.1:23458 -nat 127.0.0.1:3334 -s "${array1}:${array2}" -p "$array3" -sni "$array1" >/dev/null 2>&1 &
+ 			fi
+ 			local i=0
+ 			while [ "$i" -lt 10 ]
+diff --git a/shadowsocks/ss/cru/foreign.sh b/shadowsocks/ss/cru/foreign.sh
+index 1348a40..b7c0ac5 100755
+--- a/shadowsocks/ss/cru/foreign.sh
++++ b/shadowsocks/ss/cru/foreign.sh
+@@ -1,14 +1,3 @@
+ #!/bin/sh
+-source /koolshare/scripts/base.sh
+-LOGTIME=$(date "+%Y-%m-%d %H:%M:%S")
+-
+-ret=`/koolshare/bin/httping www.google.com.tw -s -Z -c1 -f -t 3 2>/dev/null|sed -n '2p'|sed 's/seq=0//g'|sed 's/([0-9]\+\sbytes),\s//g'`
+-S1=`echo $ret|grep -Eo "200 OK"`
+-if [ -n "$S1" ]; then
+-	S2=`echo $ret|sed 's/time=//g'|awk '{printf "%.0f ms\n",$(NF -3)}'`
+-	log='国外链接 【'$LOGTIME'】 ✓&nbsp;&nbsp;'$S2''
+-else
+-	log='国外链接 【'$LOGTIME'】 <font color='#FF0000'>X</font>'
+-fi
+-
+-nvram set ss_foreign_state="$log"
++# The firmware invokes this hook while serving /ss_status. Never block httpd.
++/koolshare/scripts/ss_health.sh refresh >/dev/null 2>&1 &
+diff --git a/shadowsocks/ss/rules/dnsmasq.postconf b/shadowsocks/ss/rules/dnsmasq.postconf
+index ee71edb..673dea1 100755
+--- a/shadowsocks/ss/rules/dnsmasq.postconf
++++ b/shadowsocks/ss/rules/dnsmasq.postconf
+@@ -11,6 +11,12 @@ ss_dns_china=`dbus get ss_dns_china`
+ ss_dns_china_user=`dbus get ss_dns_china_user`
+ gfw_on=`dbus list ss_acl_mode_|cut -d "=" -f 2 | grep 1`
+ chn_on=`dbus list ss_acl_mode_|cut -d "=" -f 2 | grep -E "2|3|4"`
++if [ -r /koolshare/scripts/ss_routing.sh ]; then
++	. /koolshare/scripts/ss_routing.sh
++	if ss_routing_load_bypass_macs && [ -n "$SS_ROUTING_UU_MACS" ]; then
++		chn_on=1
++	fi
++fi
+ all_on=`dbus list ss_acl_mode_|cut -d "=" -f 2 | grep -E "5"`
+ ISP_DNS1=$(nvram get wan0_dns|sed 's/ /\n/g'|grep -v 0.0.0.0|grep -v 127.0.0.1|sed -n 1p)
+ ISP_DNS2=$(nvram get wan0_dns|sed 's/ /\n/g'|grep -v 0.0.0.0|grep -v 127.0.0.1|sed -n 2p)
+@@ -71,9 +77,13 @@ perpare(){
+ 	[ "$ss_dns_china" == "12" ] && {
+ 		[ -n "$ss_dns_china_user" ] && CDN="$ss_dns_china_user" || CDN="114.114.114.114"
+ 	}
+-	[ -n "`cat /etc/dnsmasq.conf|grep no-resolv`" ] && sed -i '/no-resolv/d' /etc/dnsmasq.conf
+-	[ -n "`cat /etc/dnsmasq.conf|grep servers-file`" ] && sed -i '/servers-file/d' /etc/dnsmasq.conf
+-	[ -n "`cat /etc/dnsmasq.conf|grep resolv-file`" ] && sed -i '/resolv-file/d' /etc/dnsmasq.conf
++	# Keep shared conf.add/UU resolver files and domain-specific settings.
++	return 0
++}
++
++ensure_no_resolv(){
++	grep -Eq '^[[:space:]]*no-resolv([[:space:]]|$)' "$CONFIG" ||
++		pc_insert "no-poll" "no-resolv" "$CONFIG"
+ }
+ 
+ use_chn_plan(){
+@@ -88,7 +98,7 @@ use_chn_plan(){
+ 		# 选择其它国内DNS时候
+ 		pc_insert "no-poll" "server=$CDN#53" "/etc/dnsmasq.conf"
+ 	fi
+-	pc_insert "no-poll" "no-resolv" "/etc/dnsmasq.conf"
++	ensure_no_resolv
+ }
+ 
+ use_for_plan(){
+@@ -103,11 +113,11 @@ use_for_plan(){
+ 
+ 		pc_replace "cache-size=1500" "cache-size=9999" $CONFIG
+ 		pc_insert "no-poll" "server=$ss_direct_user" "/etc/dnsmasq.conf"
+-		pc_insert "no-poll" "no-resolv" "/etc/dnsmasq.conf"
++		ensure_no_resolv
+ 	else
+ 		pc_replace "cache-size=1500" "cache-size=9999" $CONFIG
+ 		pc_insert "no-poll" "server=127.0.0.1#7913" "/etc/dnsmasq.conf"
+-		pc_insert "no-poll" "no-resolv" "/etc/dnsmasq.conf"
++		ensure_no_resolv
+ 	fi
+ }
+ 
+diff --git a/shadowsocks/ss/ssconfig.sh b/shadowsocks/ss/ssconfig.sh
+index 758ed7a..00b4044 100755
+--- a/shadowsocks/ss/ssconfig.sh
++++ b/shadowsocks/ss/ssconfig.sh
+@@ -3,6 +3,16 @@
+ # shadowsocks script for AM380 merlin firmware
+ # by sadog (sadoneli@gmail.com) from koolshare.cn
+ 
++. /koolshare/scripts/ss_routing.sh
++if ! ss_routing_load_bypass_macs; then
++	printf '%s\n' 'Invalid or overlapping device MAC profiles; no routing changes were applied.' >&2
++	exit 1
++fi
++if ! sh /koolshare/scripts/ss_anytls.sh validate-hosts; then
++	printf '%s\n' 'Invalid AnyTLS Hosts mappings; no routing changes were applied.' >&2
++	exit 1
++fi
++. /koolshare/scripts/ss_dns_hooks.sh
+ eval `dbus export ss`
+ source /koolshare/scripts/base.sh
+ source helper.sh
+@@ -26,6 +36,7 @@ IFIP_DNS1=`echo $ISP_DNS1|grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}|:"`
+ IFIP_DNS2=`echo $ISP_DNS2|grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}|:"`
+ gfw_on=`dbus list ss_acl_mode_|cut -d "=" -f 2 | grep -E "1"`
+ chn_on=`dbus list ss_acl_mode_|cut -d "=" -f 2 | grep -E "2|3|4"`
++[ -n "$SS_ROUTING_UU_MACS" ] && chn_on=1
+ all_on=`dbus list ss_acl_mode_|cut -d "=" -f 2 | grep -E "5"`
+ lan_ipaddr=$(nvram get lan_ipaddr)
+ ip_prefix_hex=`nvram get lan_ipaddr | awk -F "." '{printf ("0x%02x", $1)} {printf ("%02x", $2)} {printf ("%02x", $3)} {printf ("00/0xffffff00\n")}'`
+@@ -60,6 +71,10 @@ fi
+ 	fi
+ }
+ 
++# AnyTLS has TCP SOCKS/NAT listeners only. Legacy game/UDP settings must not
++# install UDP TPROXY rules that would send packets to a TCP-only listener.
++ss_routing_is_anytls && mangle=0
++
+ get_lan_cidr(){
+ 	netmask=`nvram get lan_netmask`
+ 	local x=${netmask##*255.}
+@@ -110,13 +125,13 @@ get_server_resolver(){
+ }
+ 
+ set_lock(){
+-	exec 1000>"$LOCK_FILE"
+-	flock -x 1000
++	exec 7>"$LOCK_FILE"
++	/koolshare/bin/ss-flock -x 7 || exit 1
+ }
+ 
+ unset_lock(){
+-	flock -u 1000
+-	rm -rf "$LOCK_FILE"
++	/koolshare/bin/ss-flock -u 7
++	exec 7>&-
+ }
+ 
+ close_in_five(){
+@@ -144,18 +159,13 @@ close_in_five(){
+ # ================================= ss stop ===============================
+ restore_conf(){
+ 	echo_date 删除ss相关的名单配置文件.
+-	rm -rf /jffs/configs/dnsmasq.d/gfwlist.conf
+-	rm -rf /jffs/configs/dnsmasq.d/cdn.conf
+-	rm -rf /jffs/configs/dnsmasq.d/custom.conf
+-	rm -rf /jffs/configs/dnsmasq.d/wblist.conf
+-	rm -rf /jffs/configs/dnsmasq.d/ss_host.conf
+-	rm -rf /jffs/configs/dnsmasq.d/ss_server.conf
+-	rm -rf /jffs/configs/dnsmasq.conf.add
+-	rm -rf /jffs/scripts/dnsmasq.postconf
++	ss_dns_clear_fragment_links
++	ss_dns_hooks_remove || return 1
+ 	rm -rf /tmp/sscdn.conf
+ 	rm -rf /tmp/custom.conf
+ 	rm -rf /tmp/wblist.conf
+ 	rm -rf /tmp/ss_host.conf
++	rm -f /tmp/fancyss-server.conf
+ 	rm -rf /tmp/smartdns.conf
+ }
+ 
+@@ -324,12 +334,29 @@ resolv_server_ip(){
+ 		#echo_date "你使用的v2ray json配置，请自行将v2ray服务器ip地址添加到IP/CIDR白名单！"
+ 		return 1
+ 	else
++		# Resolve the provider's effective node host before starting the proxy.
++		# Its address must not depend on DNS transported by that same proxy.
++		if ss_routing_is_anytls; then
++			ss_basic_server=$(sh /koolshare/scripts/ss_anytls.sh map-host "$ss_basic_server") || close_in_five
++		fi
+ 		IFIP=`echo $ss_basic_server|grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}|:"`
+ 		if [ -z "$IFIP" ];then
+-			# 服务器地址强制由114解析，以免插件还未开始工作而导致解析失败
+-			echo "server=/$ss_basic_server/$(get_server_resolver)#53" > /jffs/configs/dnsmasq.d/ss_server.conf
++			# 节点地址使用独立解析器，避免启动时依赖尚未建立的代理。
++			ss_dns_write_server_config "$ss_basic_server" "$(get_server_resolver)" || close_in_five
+ 			echo_date 尝试解析节点服务器的ip地址，DNS：$(get_server_resolver)
+-			server_ip=`nslookup "$ss_basic_server" $(get_server_resolver) | sed '1,4d' | awk '{print $3}' | grep -v :|awk 'NR==1{print}'`
++			if ss_routing_is_anytls; then
++				server_ip=$(nslookup "$ss_basic_server" "$(get_server_resolver)" | awk '
++					/^Name:/ {answer=1; next}
++					answer && /Address/ {
++						for(i=2;i<=NF;i++) if($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
++							n=split($i,a,"."); valid=(n==4)
++							for(j=1;j<=n;j++) if(length(a[j])>3 || a[j]+0>255) valid=0
++							if(valid) {print $i; exit}
++						}
++					}')
++			else
++				server_ip=`nslookup "$ss_basic_server" $(get_server_resolver) | sed '1,4d' | awk '{print $3}' | grep -v :|awk 'NR==1{print}'`
++			fi
+ 			if [ "$?" == "0" ];then
+ 				server_ip=`echo $server_ip|grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}|:"`
+ 			else
+@@ -341,6 +368,10 @@ resolv_server_ip(){
+ 				fi
+ 			fi
+ 
++			if ss_routing_is_anytls && [ -z "$server_ip" ]; then
++				echo_date AnyTLS节点地址独立解析失败，请检查节点解析服务器设置。
++				close_in_five
++			fi
+ 			if [ -n "$server_ip" ];then
+ 				echo_date 节点服务器的ip地址解析成功：$server_ip
+ 				# 解析并记录一次ip，方便插件触发重启设定工作
+@@ -764,11 +795,7 @@ create_dnsmasq_conf(){
+ 	rm -rf /tmp/wblist.conf
+ 	rm -rf /tmp/gfwlist.conf
+ 	rm -rf /tmp/gfwlist.txt
+-	rm -rf /jffs/configs/dnsmasq.d/custom.conf
+-	rm -rf /jffs/configs/dnsmasq.d/wblist.conf
+-	rm -rf /jffs/configs/dnsmasq.d/cdn.conf
+-	rm -rf /jffs/configs/dnsmasq.d/gfwlist.conf
+-	rm -rf /jffs/scripts/dnsmasq.postconf
++	ss_dns_clear_fragment_links
+ 	rm -rf /tmp/smartdns.conf
+ 	
+ 	# custom dnsmasq settings by user
+@@ -906,25 +933,25 @@ create_dnsmasq_conf(){
+ 	#ln_conf
+ 	if [ -f /tmp/custom.conf ];then
+ 		#echo_date 创建域自定义dnsmasq配置文件软链接到/jffs/configs/dnsmasq.d/custom.conf
+-		ln -sf /tmp/custom.conf /jffs/configs/dnsmasq.d/custom.conf
++		ss_dns_install_link /tmp/custom.conf /jffs/configs/dnsmasq.d/custom.conf || close_in_five
+ 	fi
+ 	if [ -f /tmp/wblist.conf ];then
+ 		#echo_date 创建域名黑/白名单软链接到/jffs/configs/dnsmasq.d/wblist.conf
+-		ln -sf /tmp/wblist.conf /jffs/configs/dnsmasq.d/wblist.conf
++		ss_dns_install_link /tmp/wblist.conf /jffs/configs/dnsmasq.d/wblist.conf || close_in_five
+ 	fi
+ 	
+ 	if [ -f /tmp/sscdn.conf ];then
+ 		#echo_date 创建cdn加速列表软链接/jffs/configs/dnsmasq.d/cdn.conf
+-		ln -sf /tmp/sscdn.conf /jffs/configs/dnsmasq.d/cdn.conf
++		ss_dns_install_link /tmp/sscdn.conf /jffs/configs/dnsmasq.d/cdn.conf || close_in_five
+ 	fi
+ 
+ 	if [ "$ss_basic_mode" == "1" ];then
+ 		echo_date 创建gfwlist的软连接到/jffs/etc/dnsmasq.d/文件夹.
+-		ln -sf /koolshare/ss/rules/gfwlist.conf /jffs/configs/dnsmasq.d/gfwlist.conf
++		ss_dns_install_link /koolshare/ss/rules/gfwlist.conf /jffs/configs/dnsmasq.d/gfwlist.conf || close_in_five
+ 	elif [ "$ss_basic_mode" == "2" ] || [ "$ss_basic_mode" == "3" ];then
+ 		if [ -n "$gfw_on" ];then
+ 			echo_date 创建gfwlist的软连接到/jffs/etc/dnsmasq.d/文件夹.
+-			ln -sf /koolshare/ss/rules/gfwlist.conf /jffs/configs/dnsmasq.d/gfwlist.conf
++			ss_dns_install_link /koolshare/ss/rules/gfwlist.conf /jffs/configs/dnsmasq.d/gfwlist.conf || close_in_five
+ 		fi
+ 	elif [ "$ss_basic_mode" == "6" ];then
+ 		# 回国模式下默认方案是国内优先，所以gfwlist里的网站不能由127.0.0.1#7913来解析了，应该是国外当地直连
+@@ -936,11 +963,11 @@ create_dnsmasq_conf(){
+ 		echo_date 创建回国模式专用gfwlist的软连接到/jffs/etc/dnsmasq.d/文件夹.
+ 		[ -z "$ss_direct_user" ] && ss_direct_user="8.8.8.8#53"
+ 		cat /koolshare/ss/rules/gfwlist.conf|sed "s/127.0.0.1#7913/$ss_direct_user/g" > /tmp/gfwlist.conf
+-		ln -sf /tmp/gfwlist.conf /jffs/configs/dnsmasq.d/gfwlist.conf
++		ss_dns_install_link /tmp/gfwlist.conf /jffs/configs/dnsmasq.d/gfwlist.conf || close_in_five
+ 	fi
+ 
+ 	#echo_date 创建dnsmasq.postconf软连接到/jffs/scripts/文件夹.
+-	[ ! -L "/jffs/scripts/dnsmasq.postconf" ] && ln -sf /koolshare/ss/rules/dnsmasq.postconf /jffs/scripts/dnsmasq.postconf
++	ss_dns_hooks_install || close_in_five
+ }
+ 
+ start_haveged(){
+@@ -1304,8 +1331,8 @@ resolve_node_ip4json(){
+ 				echo_date "检测到你的json配置的${node_protocol}服务器：$node_server不是ip格式！"
+ 				echo_date "为了确保${node_protocol}的正常工作，建议配置ip格式的${node_protocol}服务器地址！"
+ 				echo_date "尝试解析${node_protocol}服务器的ip地址，DNS：$(get_server_resolver)"
+-				# 服务器地址强制由114解析，以免插件还未开始工作而导致解析失败
+-				echo "server=/$node_server/$(get_server_resolver)#53" > /jffs/configs/dnsmasq.d/ss_server.conf
++				# 节点地址使用独立解析器，避免启动时依赖尚未建立的代理。
++				ss_dns_write_server_config "$node_server" "$(get_server_resolver)" || close_in_five
+ 				node_server_ip=`nslookup "$node_server" $(get_server_resolver) | sed '1,4d' | awk '{print $3}' | grep -v :|awk 'NR==1{print}'`
+ 				if [ "$?" == "0" ]; then
+ 					node_server_ip=`echo $node_server_ip|grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}|:"`
+@@ -2299,9 +2326,9 @@ start_anytls(){
+ 	# AnyTLS start
+ 	cd /koolshare/bin
+ 	if [ -n "$ss_basic_trojan_sni" ]; then
+-		anytls -socks 127.0.0.1:23456 -nat 0.0.0.0:3333 -s "$(dbus get ss_basic_server):$ss_basic_port" -p "$ss_basic_password" -sni "$ss_basic_trojan_sni" >/dev/null 2>&1 &
++		SS_ANYTLS_INSECURE="$ss_basic_allowinsecure" /koolshare/scripts/ss_anytls.sh -socks 127.0.0.1:23456 -nat 0.0.0.0:3333 -s "$ss_basic_server:$ss_basic_port" -p "$ss_basic_password" -sni "$ss_basic_trojan_sni" >/dev/null 2>&1 &
+ 	else
+-		anytls -socks 127.0.0.1:23456 -nat 0.0.0.0:3333 -s "$(dbus get ss_basic_server):$ss_basic_port" -p "$ss_basic_password" >/dev/null 2>&1 &
++		SS_ANYTLS_INSECURE="$ss_basic_allowinsecure" /koolshare/scripts/ss_anytls.sh -socks 127.0.0.1:23456 -nat 0.0.0.0:3333 -s "$ss_basic_server:$ss_basic_port" -p "$ss_basic_password" -sni "$(dbus get ss_basic_server)" >/dev/null 2>&1 &
+ 	fi
+ 	local anytlsPID=$!
+ 	local i=10
+@@ -2338,6 +2365,10 @@ start_ss2022() {
+ }
+ 
+ write_cron_job(){
++	cru d ss_uu_coexist >/dev/null 2>&1
++	if [ -n "$SS_ROUTING_UU_MACS" ]; then
++		cru a ss_uu_coexist "* * * * * /koolshare/scripts/ss_routing.sh reconcile-uu >/dev/null 2>&1"
++	fi
+ 	sed -i '/ssupdate/d' /var/spool/cron/crontabs/* >/dev/null 2>&1
+ 	if [ "1" == "$ss_basic_rule_update" ]; then
+ 		echo_date 添加shadowsocks规则定时更新任务，每天"$ss_basic_rule_update_time"自动检测更新规则.
+@@ -2358,6 +2389,7 @@ write_cron_job(){
+ }
+ 
+ kill_cron_job(){
++	cru d ss_uu_coexist >/dev/null 2>&1
+ 	if [ -n "`cru l|grep ssupdate`" ];then
+ 		echo_date 删除shadowsocks规则定时更新任务...
+ 		sed -i '/ssupdate/d' /var/spool/cron/crontabs/* >/dev/null 2>&1
+@@ -2401,11 +2433,7 @@ load_tproxy(){
+ flush_nat(){
+ 	echo_date 清除iptables规则和ipset...
+ 	# flush rules and set if any
+-	nat_indexs=`iptables -nvL PREROUTING -t nat |sed 1,2d | sed -n '/SHADOWSOCKS/='|sort -r`
+-	for nat_index in $nat_indexs
+-	do
+-		iptables -t nat -D PREROUTING $nat_index >/dev/null 2>&1
+-	done
++	ss_routing_remove_jumps nat PREROUTING SHADOWSOCKS
+ 	#iptables -t nat -D PREROUTING -p tcp -j SHADOWSOCKS >/dev/null 2>&1
+ 	
+ 	iptables -t nat -F SHADOWSOCKS > /dev/null 2>&1 && iptables -t nat -X SHADOWSOCKS > /dev/null 2>&1
+@@ -2416,32 +2444,20 @@ flush_nat(){
+ 	iptables -t nat -F SHADOWSOCKS_GLO > /dev/null 2>&1 && iptables -t nat -X SHADOWSOCKS_GLO > /dev/null 2>&1
+ 	iptables -t nat -F SHADOWSOCKS_HOM > /dev/null 2>&1 && iptables -t nat -X SHADOWSOCKS_HOM > /dev/null 2>&1
+ 
+-	mangle_indexs=`iptables -nvL PREROUTING -t mangle |sed 1,2d | sed -n '/SHADOWSOCKS/='|sort -r`
+-	for mangle_index in $mangle_indexs
+-	do
+-		iptables -t mangle -D PREROUTING $mangle_index >/dev/null 2>&1
+-	done
++	ss_routing_remove_jumps mangle PREROUTING SHADOWSOCKS
+ 	#iptables -t mangle -D PREROUTING -p udp -j SHADOWSOCKS >/dev/null 2>&1
+ 	
+ 	iptables -t mangle -F SHADOWSOCKS >/dev/null 2>&1 && iptables -t mangle -X SHADOWSOCKS >/dev/null 2>&1
+-	iptables -t mangle -F $(get_action_chain $ss_basic_mode) > /dev/null 2>&1 && iptables -t mangle -X $(get_action_chain $ss_basic_mode) > /dev/null 2>&1
+-	iptables -t nat -D OUTPUT -p tcp -m set --match-set router dst -j REDIRECT --to-ports 3333 >/dev/null 2>&1
+-	iptables -t nat -F OUTPUT > /dev/null 2>&1
++	for owned_chain in SHADOWSOCKS_GFW SHADOWSOCKS_CHN SHADOWSOCKS_GAM SHADOWSOCKS_GLO SHADOWSOCKS_HOM; do
++		iptables -t mangle -F "$owned_chain" >/dev/null 2>&1
++		iptables -t mangle -X "$owned_chain" >/dev/null 2>&1
++	done
++	ss_routing_remove_output_rules
++	ss_routing_clear_uu_sets
+ 	iptables -t nat -X SHADOWSOCKS_EXT > /dev/null 2>&1
+ 	#iptables -t nat -D PREROUTING -p udp -s $(get_lan_cidr) --dport 53 -j DNAT --to $lan_ipaddr >/dev/null 2>&1
+ 	# 清理DNS劫持规则和链
+-	chromecast_nu=`iptables -t nat -L PREROUTING -v -n --line-numbers|grep "SHADOWSOCKS_DNS_"|awk '{print $1}'|sort -r`
+-	if [ -n "$chromecast_nu" ]; then
+-		for chromecast_index in $chromecast_nu
+-		do
+-			iptables -t nat -D PREROUTING $chromecast_index >/dev/null 2>&1
+-		done
+-	fi
+-	VLAN_INDEXS=$(ifconfig | grep -E "^br" | awk '{print $1}' | sed 's/^br//g')
+-	for VLAN_INDEX in $VLAN_INDEXS
+-	do
+-		iptables -t nat -F SHADOWSOCKS_DNS_${VLAN_INDEX} >/dev/null 2>&1 && iptables -t nat -X SHADOWSOCKS_DNS_${VLAN_INDEX} >/dev/null 2>&1
+-	done
++	ss_routing_remove_dns_rules
+ 
+ 	iptables -t mangle -D QOSO0 -m mark --mark "$ip_prefix_hex" -j RETURN >/dev/null 2>&1
+ 	# flush ipset
+@@ -2451,16 +2467,8 @@ flush_nat(){
+ 	ipset -F gfwlist >/dev/null 2>&1 && ipset -X gfwlist >/dev/null 2>&1
+ 	ipset -F router >/dev/null 2>&1 && ipset -X router >/dev/null 2>&1
+ 	#remove_redundant_rule
+-	ip_rule_exist=`ip rule show | grep "lookup 310" | grep -c 310`
+-	if [ -n "$ip_rule_exist" ];then
+-		#echo_date 清除重复的ip rule规则.
+-		until [ "$ip_rule_exist" = 0 ]
+-		do 
+-			IP_ARG=`ip rule show | grep "lookup 310"|head -n 1|cut -d " " -f3,4,5,6`
+-			ip rule del $IP_ARG
+-			ip_rule_exist=`expr $ip_rule_exist - 1`
+-		done
+-	fi
++	# Other accelerators may also use table 310. Remove only our fwmark rule.
++	while ip rule del fwmark 0x07 table 310 >/dev/null 2>&1; do :; done
+ 	#remove_route_table
+ 	#echo_date 删除ip route规则.
+ 	ip route del local 0.0.0.0/0 dev lo table 310 >/dev/null 2>&1
+@@ -2603,10 +2611,12 @@ lan_acess_control(){
+ 			# 2 acl in OUTPUT（used by koolproxy）
+ 			iptables -t nat -A SHADOWSOCKS_EXT -p tcp  $(factor $ports "-m multiport --dport") -m mark --mark "$ipaddr_hex" -$(get_jump_mode $proxy_mode) $(get_action_chain $proxy_mode)
+ 			# 3 acl in SHADOWSOCKS for mangle
+-			if [ "$proxy_mode" == "3" ];then
+-				iptables -t mangle -A SHADOWSOCKS $(factor $ipaddr "-s") -p udp $(factor $ports "-m multiport --dport") -$(get_jump_mode $proxy_mode) $(get_action_chain $proxy_mode)
+-			else
+-				[ "$mangle" == "1" ] && iptables -t mangle -A SHADOWSOCKS $(factor $ipaddr "-s") -p udp -j RETURN
++			if [ "$mangle" == "1" ]; then
++				if [ "$proxy_mode" == "3" ];then
++					iptables -t mangle -A SHADOWSOCKS $(factor $ipaddr "-s") -p udp $(factor $ports "-m multiport --dport") -$(get_jump_mode $proxy_mode) $(get_action_chain $proxy_mode)
++				else
++					iptables -t mangle -A SHADOWSOCKS $(factor $ipaddr "-s") -p udp -j RETURN
++				fi
+ 			fi
+ 		done
+ 
+@@ -2637,6 +2647,8 @@ apply_nat_rules(){
+ 	echo_date 写入iptables规则到nat表中...
+ 	# 创建SHADOWSOCKS nat rule
+ 	iptables -t nat -N SHADOWSOCKS
++	# Local TUN and game/UU devices keep their own egress, even after DHCP changes.
++	ss_routing_add_mac_returns nat SHADOWSOCKS tcp || close_in_five
+ 	# 扩展
+ 	iptables -t nat -N SHADOWSOCKS_EXT
+ 	# IP/cidr/白域名 白名单控制（不走ss）
+@@ -2681,6 +2693,9 @@ apply_nat_rules(){
+ 	[ "$mangle" == "1" ] && ip route add local 0.0.0.0/0 dev lo table 310
+ 	# 创建游戏模式udp rule
+ 	[ "$mangle" == "1" ] && iptables -t mangle -N SHADOWSOCKS
++	if [ "$mangle" == "1" ]; then
++		ss_routing_add_mac_returns mangle SHADOWSOCKS udp "$SS_ROUTING_BYPASS_MACS $SS_ROUTING_UU_MACS" || close_in_five
++	fi
+ 	# IP/cidr/白域名 白名单控制（不走ss）
+ 	[ "$mangle" == "1" ] && iptables -t mangle -A SHADOWSOCKS -p udp -m set --match-set white_list dst -j RETURN
+ 	# 创建游戏模式udp rule
+@@ -2691,6 +2706,9 @@ apply_nat_rules(){
+ 	[ "$mangle" == "1" ] && iptables -t mangle -A $(get_action_chain $ss_basic_mode) -p udp -m set ! --match-set chnroute dst -j TPROXY --on-port 3333 --tproxy-mark 0x07
+ 	#-------------------------------------------------------
+ 	# 局域网黑名单（不走ss）/局域网黑名单（走ss）
++	# UU has already had first chance in PREROUTING. Only its remaining TCP
++	# traffic from these devices uses domestic-direct / overseas-proxy rules.
++	ss_routing_add_uu_tcp_routes || close_in_five
+ 	lan_acess_control
+ 	#-----------------------FOR ROUTER---------------------
+ 	# router itself
+@@ -2705,12 +2723,13 @@ apply_nat_rules(){
+ 	# 如果主模式不是游戏模式，则不需要把SHADOWSOCKS链中剩余udp流量转发给SHADOWSOCKS_GAM，不然会造成其他模式主机的udp也走游戏模式
+ 	###[ "$mangle" == "1" ] && ss_acl_default_mode=3
+ 	[ "$ss_acl_default_mode" != "0" ] && [ "$ss_acl_default_mode" != "3" ] && [ "$ss_basic_udp_sync" != "1" ]  && ss_acl_default_mode=0
+-	[ "$ss_basic_mode" == "3" ] || [ "$ss_basic_udp_sync" == "1" ]  && iptables -t mangle -A SHADOWSOCKS -p udp -j $(get_action_chain $ss_acl_default_mode)
++	if [ "$mangle" == "1" ] && { [ "$ss_basic_mode" == "3" ] || [ "$ss_basic_udp_sync" == "1" ]; }; then
++		iptables -t mangle -A SHADOWSOCKS -p udp -j $(get_action_chain $ss_acl_default_mode)
++	fi
+ 	# 重定所有流量到 SHADOWSOCKS
+-	KP_NU=`iptables -nvL PREROUTING -t nat |sed 1,2d | sed -n '/KOOLPROXY/='|head -n1`
+-	[ "$KP_NU" == "" ] && KP_NU=0
+-	INSET_NU=`expr "$KP_NU" + 1`
+-	iptables -t nat -I PREROUTING "$INSET_NU" -p tcp -j SHADOWSOCKS
++	# Preserve UU DNAT priority, with a MAC-scoped TCP exception before UU's
++	# terminal device RETURN so the same PS5 can still reach YouTube.
++	ss_routing_add_prerouting_jump || close_in_five
+ 	[ "$mangle" == "1" ] && iptables -t mangle -A PREROUTING -p udp -j SHADOWSOCKS
+ 	# QOS开启的情况下
+ 	QOSO=`iptables -t mangle -S | grep -o QOSO | wc -l`
+@@ -2728,6 +2747,7 @@ dns_hijack_control(){
+ 			local dest_ipaddr=$(ifconfig br${VLAN_INDEX} | grep "inet addr" | awk '{print $2}'|awk -F ":" '{print $2}')
+ 			iptables -t nat -N SHADOWSOCKS_DNS_${VLAN_INDEX} >/dev/null 2>&1
+ 			iptables -t nat -F SHADOWSOCKS_DNS_${VLAN_INDEX} >/dev/null 2>&1
++			ss_routing_add_mac_returns nat SHADOWSOCKS_DNS_${VLAN_INDEX} udp || close_in_five
+ 			iptables -t nat -A SHADOWSOCKS_DNS_${VLAN_INDEX} -p udp -j DNAT --to ${dest_ipaddr}:53
+ 		done
+ 	fi
+@@ -2735,22 +2755,14 @@ dns_hijack_control(){
+ 
+ 
+ chromecast(){
+-	chromecast_nu=`iptables -t nat -L PREROUTING -v -n --line-numbers|grep "SHADOWSOCKS_DNS_"|awk '{print $1}'|sort -r`
+-	if [ -n "$chromecast_nu" ]; then
+-		for chromecast_index in $chromecast_nu
+-		do
+-			iptables -t nat -D PREROUTING $chromecast_index >/dev/null 2>&1
+-		done
+-	fi
++	ss_routing_remove_jumps nat PREROUTING SHADOWSOCKS_DNS_
+ 	if [ "$ss_basic_dns_hijack" == "1" ];then
+ 		echo_date 开启DNS劫持功能功能，防止DNS污染...
+ 		dns_hijack_control
+ 		local VLAN_INDEXS=$(ifconfig | grep -E "^br" | awk '{print $1}' | sed 's/^br//g')
+-		local INSET_NU_DNS=$((${INSET_NU} + 1))
+ 		for VLAN_INDEX in ${VLAN_INDEXS}
+ 		do
+-			iptables -t nat -I PREROUTING "${INSET_NU_DNS}" -i br${VLAN_INDEX} -p udp -m udp --dport 53 -j SHADOWSOCKS_DNS_${VLAN_INDEX}
+-			let INSET_NU_DNS+=1
++			iptables -t nat -A PREROUTING -i br${VLAN_INDEX} -p udp -m udp --dport 53 -j SHADOWSOCKS_DNS_${VLAN_INDEX}
+ 		done
+ 	else
+ 		echo_date DNS劫持功能未开启，建议开启！
+@@ -2909,14 +2921,10 @@ detect(){
+ 		close_in_five
+ 	fi
+ 	
+-	# 检测是否在lan设置中是否自定义过dns,如果有给干掉
+-	if [ -n "`nvram get dhcp_dns1_x`" ];then
+-		nvram unset dhcp_dns1_x
+-		nvram commit
+-	fi
+-	if [ -n "`nvram get dhcp_dns2_x`" ];then
+-		nvram unset dhcp_dns2_x
+-		nvram commit
++	# DNS interception is scoped below and honours direct-device profiles.
++	# Preserve DHCP DNS choices owned by the user or another router plugin.
++	if [ -n "`nvram get dhcp_dns1_x`" ] || [ -n "`nvram get dhcp_dns2_x`" ];then
++		echo_date "保留现有DHCP DNS设置；直连设备不受本插件DNS劫持影响。"
+ 	fi
+ }
+ 
+@@ -2988,6 +2996,7 @@ umount_dnsmasq_now(){
+ }
+ 
+ disable_ss(){
++	[ -x /koolshare/scripts/ss_health.sh ] && /koolshare/scripts/ss_health.sh stop >/dev/null 2>&1
+ 	echo_date ======================= 梅林固件 - 【科学上网】 ========================
+ 	echo_date
+ 	echo_date ------------------------- 关闭【科学上网】 -----------------------------
+@@ -3007,6 +3016,7 @@ disable_ss(){
+ }
+ 
+ apply_ss(){
++	[ -x /koolshare/scripts/ss_health.sh ] && /koolshare/scripts/ss_health.sh stop >/dev/null 2>&1
+ 	# router is on boot
+ 	WAN_ACTION=`ps|grep /jffs/scripts/wan-start|grep -v grep`
+ 	# now stop first
+@@ -3063,6 +3073,7 @@ apply_ss(){
+ 	set_ss_trigger_job
+ 	# post-start
+ 	ss_post_start
++	[ -x /koolshare/scripts/ss_health.sh ] && /koolshare/scripts/ss_health.sh reset >/dev/null 2>&1
+ 	echo_date ------------------------ 【科学上网】 启动完毕 ------------------------
+ }
+ 
+diff --git a/shadowsocks/uninstall.sh b/shadowsocks/uninstall.sh
+index a679ed2..614a0f0 100755
+--- a/shadowsocks/uninstall.sh
++++ b/shadowsocks/uninstall.sh
+@@ -4,6 +4,10 @@
+ # by sadog (sadoneli@gmail.com) from koolshare.cn
+ 
+ sh /koolshare/ss/ssconfig.sh stop
++rm -f /koolshare/bin/ss-flock
++rm -f /koolshare/res/ss-health.js /koolshare/res/ss-health.css /koolshare/res/ss_health.json /koolshare/res/ss-health-status.js
++rm -rf /tmp/ss_health
++rm -f /tmp/ss_health.json
+ sh /koolshare/scripts/ss_conf_remove.sh
+ sleep 1
+ 
+diff --git a/shadowsocks/webs/Main_Ss_Content.asp b/shadowsocks/webs/Main_Ss_Content.asp
+index 38a7c32..463d0d9 100755
+--- a/shadowsocks/webs/Main_Ss_Content.asp
++++ b/shadowsocks/webs/Main_Ss_Content.asp
+@@ -14,11 +14,13 @@
+ <link rel="stylesheet" type="text/css" href="css/element.css">
+ <link rel="stylesheet" type="text/css" href="/device-map/device-map.css">
+ <link rel="stylesheet" type="text/css" href="/res/shadowsocks.css">
++<link rel="stylesheet" type="text/css" href="/res/ss-health.css">
+ <link rel="stylesheet" type="text/css" href="/res/layer/theme/default/layer.css">
+ <script type="text/javascript" src="/state.js"></script>
+ <script type="text/javascript" src="/popup.js"></script>
+ <script type="text/javascript" src="/validator.js"></script>
+ <script type="text/javascript" src="/js/jquery.js"></script>
++<script type="text/javascript" src="/res/ss-health.js"></script>
+ <script type="text/javascript" src="/general.js"></script>
+ <script type="text/javascript" src="/switcherplugin/jquery.iphone-switch.js"></script>
+ <script type="text/javascript" src="/client_function.js"></script>
+@@ -40,12 +42,24 @@ var refreshRate;
+ function init() {
+ 	show_menu(menu_hook);
+ 	update_ss_ui(db_ss);
++	loadAdvancedSettings(db_ss);
+ 	loadAllConfigs();
+ 	decode_show();
+ 	toggle_func();
+ 	version_show();
+ 	hook_event();
+ 	detect();
++	if (typeof SsHealth !== "undefined") {
++		SsHealth.start({
++			url: "/res/ss-health-status.js",
++			enabled: db_ss["ss_basic_enable"],
++			nodeId: db_ss["ssconf_basic_node"],
++			nodeLabel: E("ssconf_basic_node").selectedIndex >= 0 ? E("ssconf_basic_node").options[E("ssconf_basic_node").selectedIndex].text : ""
++		});
++	} else {
++		E("ss_health_title").innerHTML = "增强检测组件未载入";
++		E("ss_health_note").innerHTML = "请刷新页面重试，旧版检测仍可参考。";
++	}
+ 	setTimeout("get_ss_status_data()", 500);
+ }
+ 
+@@ -395,12 +409,105 @@ function updateHy2GlobalForm() {
+ 	showhide("ss_basic_hy2_bbr_profile_span", congestionType == "bbr");
+ }
+ 
++function clearBypassError() {
++	E("ss_bypass_error").innerHTML = "";
++	E("ss_uu_error").innerHTML = "";
++	E("ss_basic_bypass_macs").removeAttribute("aria-invalid");
++	E("ss_basic_uu_macs").removeAttribute("aria-invalid");
++}
++
++function validateBypassDevices() {
++	var field = E("ss_basic_bypass_macs");
++	var uuField = E("ss_basic_uu_macs");
++	clearBypassError();
++	if (typeof SsHealth === "undefined") {
++		E("ss_bypass_error").appendChild(document.createTextNode("设备旁路验证组件未载入，请刷新页面后重试。"));
++		return false;
++	}
++	var result = SsHealth.normalizePolicies(field.value, uuField.value);
++	if (!result.valid) {
++		var invalidField = E(result.field);
++		var errorId = result.field === "ss_basic_uu_macs" ? "ss_uu_error" : "ss_bypass_error";
++		E(errorId).appendChild(document.createTextNode(result.error));
++		invalidField.setAttribute("aria-invalid", "true");
++		if (E("tablet_5") && E("tablet_5").style.display === "none") { $("#show_btn5").trigger("click"); }
++		invalidField.focus();
++		return false;
++	}
++	field.value = result.bypass;
++	uuField.value = result.uu;
++	return true;
++}
++
++function loadAdvancedSettings(config) {
++	if (typeof SsHealth === "undefined") { return; }
++	var defaults = SsHealth.advancedDefaults;
++	for (var key in defaults) {
++		if (!defaults.hasOwnProperty(key)) { continue; }
++		var value = config[key];
++		if (typeof value === "undefined" || value === "") { value = defaults[key]; }
++		if (key === "ss_basic_anytls_hosts") { value = String(value).replace(/,/g, "\n"); }
++		E(key).value = key === "ss_basic_anytls_alpn" && value === "auto" ? "" : value;
++	}
++}
++
++function setAdvancedSection(group, expanded) {
++	E("ss_" + group + "_advanced_body").style.display = expanded ? "" : "none";
++	var button = E("ss_" + group + "_advanced_toggle");
++	button.setAttribute("aria-expanded", expanded ? "true" : "false");
++	button.value = (group === "anytls" ? "AnyTLS 高级连接设置" : "健康检测设置") + (expanded ? " · 收起" : " · 展开");
++}
++
++function toggleAdvancedSection(group) {
++	setAdvancedSection(group, E("ss_" + group + "_advanced_body").style.display === "none");
++}
++
++function clearAdvancedError(group) {
++	E("ss_" + group + "_advanced_error").innerHTML = "";
++	var fields = E("ss_" + group + "_advanced_body").getElementsByTagName("input");
++	var selects = E("ss_" + group + "_advanced_body").getElementsByTagName("select");
++	var textareas = E("ss_" + group + "_advanced_body").getElementsByTagName("textarea");
++	var i;
++	for (i = 0; i < fields.length; i++) { fields[i].removeAttribute("aria-invalid"); }
++	for (i = 0; i < selects.length; i++) { selects[i].removeAttribute("aria-invalid"); }
++	for (i = 0; i < textareas.length; i++) { textareas[i].removeAttribute("aria-invalid"); }
++}
++
++function validateAdvancedSettings() {
++	clearAdvancedError("anytls");
++	clearAdvancedError("health");
++	if (typeof SsHealth === "undefined") {
++		alert("设置验证组件未载入，请刷新页面后重试。");
++		return null;
++	}
++	var values = {};
++	for (var key in SsHealth.advancedDefaults) {
++		if (SsHealth.advancedDefaults.hasOwnProperty(key)) { values[key] = E(key).value; }
++	}
++	var result = SsHealth.normalizeAdvanced(values);
++	if (!result.valid) {
++		var group = result.field.indexOf("ss_basic_health_") === 0 ? "health" : "anytls";
++		$(group === "health" ? "#show_btn6" : "#show_btn2").trigger("click");
++		setAdvancedSection(group, true);
++		E("ss_" + group + "_advanced_error").appendChild(document.createTextNode(result.error));
++		E(result.field).setAttribute("aria-invalid", "true");
++		E(result.field).focus();
++		return null;
++	}
++	return result.values;
++}
++
+ function save() {
+ 	var node_sel = E("ssconf_basic_node").value
+ 	if (!node_sel) {
+ 		alert("你尚未定义任何节点，提交失败！");
+ 		return false
+ 	}
++	if (!validateBypassDevices()) {
++		return false;
++	}
++	var advancedSettings = validateAdvancedSettings();
++	if (!advancedSettings) { return false; }
+ 	//stop check status
+ 	checkss = 10001;
+ 	E("ss_state2").innerHTML = "国外连接 - " + "Waiting...";
+@@ -420,9 +527,11 @@ function save() {
+ 	var params_base64_a = ["ss_dnsmasq", "ss_wan_white_ip", "ss_wan_white_domain", "ss_wan_black_ip", "ss_wan_black_domain", "ss_online_links"];
+ 	var params_base64_b = ["ss_basic_password", "ss_basic_custom", "ss_basic_hy2_global_json"];
+ 	// collect data from input
++	params_input.push("ss_basic_bypass_macs", "ss_basic_uu_macs");
++	params_input.push("ss_basic_anytls_min_idle", "ss_basic_anytls_idle_check", "ss_basic_anytls_idle_timeout", "ss_basic_anytls_handshake", "ss_basic_anytls_alpn", "ss_basic_anytls_fingerprint", "ss_basic_anytls_hosts", "ss_basic_health_interval", "ss_basic_health_timeout", "ss_basic_health_failures");
+ 	for (var i = 0; i < params_input.length; i++) {
+ 		if (E(params_input[i])) {
+-			dbus[params_input[i]] = E(params_input[i]).value;
++			dbus[params_input[i]] = advancedSettings.hasOwnProperty(params_input[i]) ? advancedSettings[params_input[i]] : E(params_input[i]).value;
+ 		}
+ 	}
+ 	// collect data from checkbox
+@@ -2650,43 +2759,60 @@ function version_show() {
+ 	});
+ }
+ 
++function refreshEnhancedHealth(isEnabled) {
++	if (typeof SsHealth !== "undefined") {
++		SsHealth.refresh(isEnabled);
++	}
++}
++
+ function get_ss_status_data() {
+-	if (checkss < 10000) {
+-		checkss++;
+-		$.ajax({
+-			type: "get",
+-			url: "/dbconf?p=ss_basic_enable",
+-			dataType: "script",
+-			success: function() {
+-				if (db_ss_basic_enable['ss_basic_enable'] == "1") {
+-					$.ajax({
+-						url: '/ss_status',
+-						dataType: "html",
+-						success: function(response) {
+-							console.log(response)
++	if (checkss > 10000) {
++		return;
++	}
++	var scheduled = false;
++	function scheduleNext() {
++		if (!scheduled && checkss < 10000) {
++			scheduled = true;
++			setTimeout(get_ss_status_data, 6000);
++		}
++	}
++	$.ajax({
++		type: "get",
++		url: "/dbconf?p=ss_basic_enable",
++		dataType: "script",
++		timeout: 5000,
++		success: function() {
++			if (db_ss_basic_enable['ss_basic_enable'] == "1") {
++				$.ajax({
++					url: '/ss_status',
++					dataType: "html",
++					timeout: 15000,
++					success: function(response) {
++						try {
+ 							var arr = JSON.parse(response);
+-							if (arr[0] == "" || arr[1] == "") {
+-								E("ss_state2").innerHTML = "国外连接 - " + "Waiting for first refresh...";
+-								E("ss_state3").innerHTML = "国内连接 - " + "Waiting for first refresh...";
+-							} else {
+-								E("ss_state2").innerHTML = arr[0];
+-								E("ss_state3").innerHTML = arr[1];
+-							}
++							E("ss_state2").innerHTML = arr[0] || "国外检测等待采样";
++							E("ss_state3").innerHTML = arr[1] || "国内检测等待采样";
++						} catch (ignore) {
++							E("ss_state2").innerHTML = "旧版国外检测暂不可读";
+ 						}
+-					});
+-				} else {
+-					E("ss_state2").innerHTML = "国外连接 - " + "Waiting...";
+-					E("ss_state3").innerHTML = "国内连接 - " + "Waiting...";
+-				}
+-				refreshRate = Math.floor(Math.random() * 4000) + 4000;
+-				setTimeout("get_ss_status_data();", refreshRate);
++					},
++					complete: function() {
++						scheduleNext();
++						refreshEnhancedHealth(true);
++					}
++				});
++			} else {
++				E("ss_state2").innerHTML = "代理已关闭";
++				E("ss_state3").innerHTML = "";
++				scheduleNext();
++				refreshEnhancedHealth(false);
+ 			}
+-
+-		});
+-	}else{
+-		E("ss_state2").innerHTML = "国外连接 - " + "Waiting...";
+-		E("ss_state3").innerHTML = "国内连接 - " + "Waiting...";
+-	}
++		},
++		error: function() {
++			scheduleNext();
++			refreshEnhancedHealth();
++		}
++	});
+ }
+ 
+ function get_udp_status() {
+@@ -3714,7 +3840,7 @@ function set_cron(action) {
+ 								<tr>
+ 									<td bgcolor="#4D595D" colspan="3" valign="top">
+ 										<div>&nbsp;</div>
+-										<div class="formfonttitle">梅林固件 - 科学上网插件</div>
++										<div class="formfonttitle"><img src="/res/icon-shadowsocks.png" class="ss-health-plugin-icon" width="28" height="28" alt="" aria-hidden="true" />梅林固件 - 科学上网插件 <span style="font-size:12px;font-weight:normal">R7000 增强 r3</span></div>
+ 										<div style="float:right; width:15px; height:25px;margin-top:-20px">
+ 											<img id="return_btn" onclick="reload_Soft_Center();" align="right" style="cursor:pointer;position:absolute;margin-left:-30px;margin-top:-25px;" title="返回软件中心" src="/images/backprev.png" onMouseOver="this.src='/images/backprevclick.png'" onMouseOut="this.src='/images/backprev.png'"></img>
+ 										</div>
+@@ -3775,28 +3901,41 @@ function set_cron(action) {
+ 												</tr>
+                                     		</table>
+                                     	</div>
+-                                    	<div id="ss_status1">
+-											<table style="margin:-1px 0px 0px 0px;" width="100%" border="1" align="center" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable" >
+-												<tr id="ss_state">
+-												<th id="mode_state" width="35%"><a class="hintstyle" href="javascript:void(0);" onclick="openssHint(0)">SS运行状态</a></th>
+-													<td>
+-														<div style="display:table-cell;float: left;margin-left:0px;">
+-															<a class="hintstyle" href="javascript:void(0);" onclick="openssHint(0)">
+-																<span id="ss_state2">国外连接 - Waiting...</span>
+-																<br/>
+-																<span id="ss_state3">国内连接 - Waiting...</span>
+-															</a>
+-														</div>
+-														<div style="display:table-cell;float: left;margin-left:270px;position: absolute;padding: 10.5px 0px;">
+-															<a type="button" class="ss_btn" style="cursor:pointer" onclick="pop_111(3)" href="javascript:void(0);">分流检测</a>
+-														</div>
+-														<div style="display:table-cell;float: left;margin-left:350px;position: absolute;padding: 10.5px 0px;">
+-														<a type="button" class="ss_btn" style="cursor:pointer" onclick="get_proc_status(3)" href="javascript:void(0);">详细状态</a>
+-														</div>
+-													</td>
+-												</tr>
+-											</table>
+-										</div>
++                                        <div id="ss_status1">
++                                            <table width="100%" border="1" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable">
++                                                <tr id="ss_state">
++                                                    <td colspan="2" class="ss-health-cell">
++                                                        <div id="ss_health" class="ss-health ss-health-checking">
++                                                            <div class="ss-health-head">
++                                                                <div class="ss-health-heading">
++                                                                    <strong id="ss_health_title" class="ss-health-title" role="status" aria-live="polite" aria-atomic="true">等待检测</strong>
++                                                                    <a id="mode_state" class="ss-health-mode" href="javascript:void(0);">运行状态</a>
++                                                                    <div class="ss-health-context"><span id="ss_health_node"></span><span id="ss_health_time" class="ss-health-time"></span></div>
++                                                                </div>
++                                                                <div class="ss-health-actions">
++                                                                    <a class="ss_btn" href="javascript:void(0);" onclick="pop_111(3)">分流检测</a>
++                                                                    <a class="ss_btn" href="javascript:void(0);" onclick="get_proc_status(3)">详细状态</a>
++                                                                </div>
++                                                            </div>
++                                                            <div class="ss-health-metrics">
++                                                                <div class="ss-health-metric"><span class="ss-health-metric-label">最近 HTTPS 延迟</span><span id="ss_health_latency" class="ss-health-metric-value">—</span><span id="ss_health_median" class="ss-health-median"></span></div>
++                                                                <div class="ss-health-metric"><span id="ss_health_rate_label" class="ss-health-metric-label">完整通过率</span><span id="ss_health_success" class="ss-health-metric-value">—</span><span id="ss_health_sample_count" class="ss-health-sample-count">等待采样</span></div>
++                                                                <div class="ss-health-metric"><span class="ss-health-metric-label">P95 延迟</span><span id="ss_health_p95" class="ss-health-metric-value">—</span></div>
++                                                                <div class="ss-health-metric"><span class="ss-health-metric-label">延迟波动</span><span id="ss_health_jitter" class="ss-health-metric-value">—</span></div>
++                                                            </div>
++                                                            <div id="ss_health_targets" class="ss-health-targets"></div>
++                                                            <p id="ss_health_note" class="ss-health-note">首次采样完成后显示连接状态。</p>
++                                                            <p class="ss-health-scope">检测从路由器发起；设备自身 VPN 与 UU 加速的状态不在此统计中。</p>
++                                                        </div>
++                                                        <div id="ss_health_legacy" class="ss-health-legacy">
++                                                            <span id="ss_health_legacy_label" class="ss-health-legacy-label">旧版单次 HTTP 检测，仅供参考</span>
++                                                            <span id="ss_health_legacy_foreign"><span id="ss_state2">国外检测等待采样</span><br /></span>
++                                                            <span id="ss_state3">国内检测等待采样</span>
++                                                        </div>
++                                                    </td>
++                                                </tr>
++                                            </table>
++                                        </div>
+ 										<div id="tablets">
+ 											<table style="margin:10px 0px 0px 0px;border-collapse:collapse" width="100%" height="37px">
+ 												<tr width="235px">
+@@ -4727,6 +4866,23 @@ function set_cron(action) {
+ 										</div>
+ 										<!--=====tablet_2=====-->
+ 										<div id="tablet_2" style="display: none;">
++                                            <div class="ss-advanced" id="ss_anytls_advanced">
++                                                <input type="button" id="ss_anytls_advanced_toggle" class="ss-advanced-toggle" value="AnyTLS 高级连接设置 · 展开" aria-expanded="false" aria-controls="ss_anytls_advanced_body" onclick="toggleAdvancedSection('anytls');" />
++                                                <div id="ss_anytls_advanced_body" style="display:none;">
++                                                    <p id="ss_anytls_advanced_help" class="ss-advanced-help">仅对 AnyTLS 节点生效，保存并应用后重新连接。证书校验沿用节点本身的设置。</p>
++                                                    <table width="100%" border="1" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable ss-advanced-table">
++                                                        <tr><th scope="row"><label for="ss_basic_anytls_min_idle">最少空闲连接</label></th><td><input type="text" id="ss_basic_anytls_min_idle" name="ss_basic_anytls_min_idle" class="input_ss_table ss-advanced-number" value="0" maxlength="2" inputmode="numeric" aria-describedby="ss_anytls_advanced_help ss_anytls_advanced_error" oninput="clearAdvancedError('anytls');" /> <span class="ss-advanced-unit">个 · 0–20</span><p class="ss-advanced-help">设为 0 可减少常驻连接与内存占用。</p></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_anytls_idle_check">空闲连接检查间隔</label></th><td><input type="text" id="ss_basic_anytls_idle_check" name="ss_basic_anytls_idle_check" class="input_ss_table ss-advanced-number" value="30" maxlength="3" inputmode="numeric" aria-describedby="ss_anytls_advanced_help ss_anytls_advanced_error" oninput="clearAdvancedError('anytls');" /> <span class="ss-advanced-unit">秒 · 5–300</span></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_anytls_idle_timeout">空闲连接回收时间</label></th><td><input type="text" id="ss_basic_anytls_idle_timeout" name="ss_basic_anytls_idle_timeout" class="input_ss_table ss-advanced-number" value="30" maxlength="3" inputmode="numeric" aria-describedby="ss_anytls_advanced_help ss_anytls_advanced_error" oninput="clearAdvancedError('anytls');" /> <span class="ss-advanced-unit">秒 · 5–600</span></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_anytls_handshake">握手超时</label></th><td><input type="text" id="ss_basic_anytls_handshake" name="ss_basic_anytls_handshake" class="input_ss_table ss-advanced-number" value="8" maxlength="2" inputmode="numeric" aria-describedby="ss_anytls_advanced_help ss_anytls_advanced_error" oninput="clearAdvancedError('anytls');" /> <span class="ss-advanced-unit">秒 · 3–20</span></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_anytls_alpn">ALPN 协商协议</label></th><td><input type="text" id="ss_basic_anytls_alpn" name="ss_basic_anytls_alpn" class="input_ss_table ss-advanced-alpn" value="h2" maxlength="64" placeholder="留空自动协商" aria-describedby="ss_anytls_alpn_help ss_anytls_advanced_error" autocomplete="off" spellcheck="false" oninput="clearAdvancedError('anytls');" /><p id="ss_anytls_alpn_help" class="ss-advanced-help">支持 h2、http/1.1，可用逗号分隔；留空使用自动协商。</p></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_anytls_fingerprint">TLS 指纹</label></th><td><select id="ss_basic_anytls_fingerprint" name="ss_basic_anytls_fingerprint" class="input_option" aria-describedby="ss_anytls_advanced_help ss_anytls_advanced_error" onchange="clearAdvancedError('anytls');"><option value="chrome" selected="selected">Chrome</option><option value="standard">标准 TLS</option></select></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_anytls_hosts">服务商 Hosts 映射（节点解析）</label></th><td><div class="ss-device-policy"><textarea id="ss_basic_anytls_hosts" name="ss_basic_anytls_hosts" rows="3" maxlength="16384" placeholder="node.example.com=connect.example.com" aria-describedby="ss_anytls_hosts_help ss_anytls_advanced_error" autocomplete="off" autocapitalize="off" spellcheck="false" oninput="clearAdvancedError('anytls');"></textarea></div><p id="ss_anytls_hosts_help" class="ss-advanced-help">每行 原域名=目标域名或IPv4，也可用逗号分隔，最多 32 条。使用 ASCII 域名；来源也支持 IPv4。重复来源须指向同一目标，映射链最多 4 跳。</p><p class="ss-advanced-help">仅替换 AnyTLS 节点的连接目标，保留节点 SNI。留空使用节点原地址；此设置不修改设备自身 VPN / TUN 或全局 DNS。</p></td></tr>
++                                                    </table>
++                                                    <p id="ss_anytls_advanced_error" class="ss-device-policy-error" role="alert"></p>
++                                                </div>
++                                            </div>
++
+ 											<table style="margin:-1px 0px 0px 0px;" width="100%" border="1" align="center" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable">
+ 												<tr id="dns_plan_china">
+ 													<th width="20%"><a class="hintstyle" href="javascript:void(0);" onclick="openssHint(25)">选择中国DNS</a></th>
+@@ -5621,6 +5777,28 @@ taobao.com
+ 										</div>
+ 										<!--====LAN ACL=====-->
+ 										<div id="tablet_5" style="display: none;">
++                                            <table width="100%" border="1" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable ss-device-policy">
++                                                <tr>
++                                                    <th scope="row"><label for="ss_basic_bypass_macs">自带 VPN 设备旁路</label></th>
++                                                    <td>
++                                                        <textarea id="ss_basic_bypass_macs" name="ss_basic_bypass_macs" rows="3" maxlength="4096" placeholder="AA:BB:CC:DD:EE:FF" aria-describedby="ss_bypass_help ss_bypass_error" autocomplete="off" autocapitalize="off" spellcheck="false" oninput="clearBypassError();"></textarea>
++                                                        <p id="ss_bypass_help" class="ss-device-policy-help">列出的设备保留原有 TCP 与 DNS 路径，交给设备自身 VPN 处理。每行一个 MAC 地址，也可用逗号分隔，最多 32 个；留空则不旁路设备。保存并应用后生效。</p>
++                                                        <p class="ss-device-policy-help">关闭设备自身的 TUN / VPN 后，需要移除此旁路，才能使用路由器代理。此设置不会关闭设备自身的 VPN。</p>
++                                                        <p id="ss_bypass_error" class="ss-device-policy-error" role="alert"></p>
++                                                    </td>
++                                                </tr>
++                                            </table>
++											<table width="100%" border="1" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable ss-device-policy">
++                                                <tr>
++                                                    <th scope="row"><label for="ss_basic_uu_macs">PS5 / UU 共存设备</label></th>
++                                                    <td>
++                                                        <textarea id="ss_basic_uu_macs" name="ss_basic_uu_macs" rows="3" maxlength="4096" placeholder="AA:BB:CC:DD:EE:FF" aria-describedby="ss_uu_help ss_uu_error" autocomplete="off" autocapitalize="off" spellcheck="false" oninput="clearBypassError();"></textarea>
++                                                        <p id="ss_uu_help" class="ss-device-policy-help">游戏加速规则优先；其余境外 IPv4 TCP（如 YouTube）走路由器代理。UDP 由 UU 或原网络处理，DNS 沿用 UU 与路由器的现有规则。</p>
++                                                        <p class="ss-device-policy-help">每行一个 MAC 地址，也可用逗号分隔，最多 32 个。每台设备只选择一种策略，请勿与上方旁路列表重复。保存并应用后生效。</p>
++                                                        <p id="ss_uu_error" class="ss-device-policy-error" role="alert"></p>
++                                                    </td>
++                                                </tr>
++                                            </table>
+ 											<table id="ACL_table" style="margin:-1px 0px 0px 0px;" width="100%" border="1" align="center" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable" >
+ 													<tr>
+ 														<th style="width:180px;">主机IP地址</th>
+@@ -5669,6 +5847,19 @@ taobao.com
+ 										</div>
+ 										<!--===== addon =====-->
+ 										<div id="tablet_6" style="display: none;">
++                                            <div class="ss-advanced" id="ss_health_advanced">
++                                                <input type="button" id="ss_health_advanced_toggle" class="ss-advanced-toggle" value="健康检测设置 · 展开" aria-expanded="false" aria-controls="ss_health_advanced_body" onclick="toggleAdvancedSection('health');" />
++                                                <div id="ss_health_advanced_body" style="display:none;">
++                                                    <p id="ss_health_advanced_help" class="ss-advanced-help">调整路由器的 HTTPS 检测频率与失败判定。更短的间隔会增加检测流量；此处不控制 UU 或设备自身 VPN。保存并应用后生效。</p>
++                                                    <table width="100%" border="1" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable ss-advanced-table">
++                                                        <tr><th scope="row"><label for="ss_basic_health_interval">检测间隔</label></th><td><select id="ss_basic_health_interval" name="ss_basic_health_interval" class="input_option" aria-describedby="ss_health_advanced_help ss_health_advanced_error" onchange="clearAdvancedError('health');"><option value="30" selected="selected">30 秒</option><option value="60">60 秒</option><option value="120">120 秒</option></select></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_health_timeout">单目标超时</label></th><td><select id="ss_basic_health_timeout" name="ss_basic_health_timeout" class="input_option" aria-describedby="ss_health_advanced_help ss_health_advanced_error" onchange="clearAdvancedError('health');"><option value="6">6 秒</option><option value="8">8 秒</option><option value="10" selected="selected">10 秒</option></select></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_health_failures">连续失败判定次数</label></th><td><input type="text" id="ss_basic_health_failures" name="ss_basic_health_failures" class="input_ss_table ss-advanced-number" value="3" maxlength="1" inputmode="numeric" aria-describedby="ss_health_failures_help ss_health_advanced_error" oninput="clearAdvancedError('health');" /> <span class="ss-advanced-unit">轮 · 1–5</span><p id="ss_health_failures_help" class="ss-advanced-help">所有目标连续未通过达到此次数时，显示连接检测失败；部分目标未通过时显示连接波动。</p></td></tr>
++                                                    </table>
++                                                    <p id="ss_health_advanced_error" class="ss-device-policy-error" role="alert"></p>
++                                                </div>
++                                            </div>
++
+ 											<table style="margin:-1px 0px 0px 0px;" width="100%" border="1" align="center" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable" >
+ 												<tr>
+ 													<th style="width:20%;"><a class="hintstyle" href="javascript:void(0);" onclick="openssHint(24)">导出SS配置</a></th>

@@ -1,0 +1,708 @@
+diff --git a/cmd/client/main.go b/cmd/client/main.go
+index ee82863..212b188 100644
+--- a/cmd/client/main.go
++++ b/cmd/client/main.go
+@@ -1,17 +1,17 @@
+ package main
+ 
+ import (
+-	"anytls/proxy"
+ 	"anytls/util"
+ 	"context"
+ 	"crypto/sha256"
+-	"crypto/tls"
+ 	"flag"
+ 	"fmt"
+ 	"net"
+ 	"net/url"
+ 	"os"
++	"strconv"
+ 	"strings"
++	"time"
+ 
+ 	"github.com/sirupsen/logrus"
+ )
+@@ -24,6 +24,12 @@ func main() {
+ 	sni := flag.String("sni", "", "Server Name Indication")
+ 	password := flag.String("p", "", "Password")
+ 	minIdleSession := flag.Int("m", 5, "Reserved min idle session")
++	idleCheck := flag.Duration("idle-check", 30*time.Second, "Idle session check interval (5s..300s)")
++	idleTimeout := flag.Duration("idle-timeout", 30*time.Second, "Idle session timeout (5s..600s)")
++	insecure := flag.Bool("insecure", true, "Skip server certificate verification (legacy default; set -insecure=false to verify)")
++	alpn := flag.String("alpn", "", "Comma-separated TLS ALPN protocols (e.g., h2)")
++	fingerprint := flag.String("fingerprint", "standard", "TLS ClientHello profile: standard or chrome")
++	handshakeTimeout := flag.Duration("handshake-timeout", 8*time.Second, "TLS handshake timeout (3s..20s)")
+ 	listenAddr := flag.String("l", "", "SOCKS5 listen address, compatibility alias for -socks")
+ 	version := flag.Bool("v", false, "Print version and exit")
+ 	flag.BoolVar(version, "version", false, "Print version and exit")
+@@ -38,6 +44,11 @@ func main() {
+ 		fmt.Println(util.ProgramVersionName)
+ 		return
+ 	}
++	var insecureSet, alpnSet bool
++	flag.Visit(func(f *flag.Flag) {
++		insecureSet = insecureSet || f.Name == "insecure"
++		alpnSet = alpnSet || f.Name == "alpn"
++	})
+ 
+ 	if serverURL, err := url.Parse(*serverAddr); err == nil {
+ 		if serverURL.Scheme == "anytls" {
+@@ -47,6 +58,16 @@ func main() {
+ 			}
+ 			query := serverURL.Query()
+ 			*sni = query.Get("sni")
++			if query.Has("insecure") && !insecureSet {
++				value, err := strconv.ParseBool(query.Get("insecure"))
++				if err != nil {
++					logrus.Fatalln("invalid insecure URI parameter")
++				}
++				*insecure = value
++			}
++			if query.Has("alpn") && !alpnSet {
++				*alpn = query.Get("alpn")
++			}
+ 		}
+ 	}
+ 
+@@ -61,6 +82,9 @@ func main() {
+ 	if _, _, err := net.SplitHostPort(*serverAddr); err != nil {
+ 		logrus.Fatalln("error server address:", *serverAddr, err)
+ 	}
++	if err := validateClientSettings(*minIdleSession, *handshakeTimeout, *idleCheck, *idleTimeout); err != nil {
++		logrus.Fatalln(err)
++	}
+ 
+ 	if *socksAddr == "" && *listenAddr != "" {
+ 		*socksAddr = *listenAddr
+@@ -77,14 +101,13 @@ func main() {
+ 
+ 	logrus.Infoln("[Client]", util.ProgramVersionName)
+ 
+-	// You can only use `InsecureSkipVerify` by default in the sample client; it is not recommended for use in production code.
+-	tlsConfig := &tls.Config{
+-		ServerName:         *sni,
+-		InsecureSkipVerify: true,
++	tlsConfig, err := newTLSConfig(*serverAddr, *sni, *alpn, *insecure)
++	if err != nil {
++		logrus.Fatalln(err)
+ 	}
+-	if tlsConfig.ServerName == "" {
+-		// disable the SNI
+-		tlsConfig.ServerName = "127.0.0.1"
++	fingerprintName, err := parseTLSFingerprint(*fingerprint)
++	if err != nil {
++		logrus.Fatalln(err)
+ 	}
+ 
+ 	path := strings.TrimSpace(os.Getenv("TLS_KEY_LOG"))
+@@ -99,13 +122,8 @@ func main() {
+ 
+ 	// Create anytls client
+ 	client := NewMyClient(ctx, func(ctx context.Context) (net.Conn, error) {
+-		conn, err := proxy.SystemDialer.DialContext(ctx, "tcp", *serverAddr)
+-		if err != nil {
+-			return nil, err
+-		}
+-		conn = tls.Client(conn, tlsConfig)
+-		return conn, nil
+-	}, *minIdleSession)
++		return dialTLS(ctx, *serverAddr, tlsConfig, fingerprintName, *handshakeTimeout)
++	}, *idleCheck, *idleTimeout, *minIdleSession)
+ 
+ 	// Create inbound listeners
+ 	var inbounds []*InboundListener
+diff --git a/cmd/client/myclient.go b/cmd/client/myclient.go
+index 034ada3..5469509 100644
+--- a/cmd/client/myclient.go
++++ b/cmd/client/myclient.go
+@@ -18,11 +18,11 @@ type myClient struct {
+ 	sessionClient *session.Client
+ }
+ 
+-func NewMyClient(ctx context.Context, dialOut util.DialOutFunc, minIdleSession int) *myClient {
++func NewMyClient(ctx context.Context, dialOut util.DialOutFunc, idleCheck, idleTimeout time.Duration, minIdleSession int) *myClient {
+ 	s := &myClient{
+ 		dialOut: dialOut,
+ 	}
+-	s.sessionClient = session.NewClient(ctx, s.createOutboundConnection, &padding.DefaultPaddingFactory, time.Second*30, time.Second*30, minIdleSession)
++	s.sessionClient = session.NewClient(ctx, s.createOutboundConnection, &padding.DefaultPaddingFactory, idleCheck, idleTimeout, minIdleSession)
+ 	return s
+ }
+ 
+diff --git a/cmd/client/settings.go b/cmd/client/settings.go
+new file mode 100644
+index 0000000..8d904a6
+--- /dev/null
++++ b/cmd/client/settings.go
+@@ -0,0 +1,22 @@
++package main
++
++import (
++	"fmt"
++	"time"
++)
++
++func validateClientSettings(minIdle int, handshake, idleCheck, idleTimeout time.Duration) error {
++	if minIdle < 0 || minIdle > 20 {
++		return fmt.Errorf("m must be between 0 and 20")
++	}
++	if handshake < 3*time.Second || handshake > 20*time.Second {
++		return fmt.Errorf("handshake-timeout must be between 3s and 20s")
++	}
++	if idleCheck < 5*time.Second || idleCheck > 300*time.Second {
++		return fmt.Errorf("idle-check must be between 5s and 300s")
++	}
++	if idleTimeout < 5*time.Second || idleTimeout > 600*time.Second {
++		return fmt.Errorf("idle-timeout must be between 5s and 600s")
++	}
++	return nil
++}
+diff --git a/cmd/client/settings_test.go b/cmd/client/settings_test.go
+new file mode 100644
+index 0000000..fd67d41
+--- /dev/null
++++ b/cmd/client/settings_test.go
+@@ -0,0 +1,34 @@
++package main
++
++import (
++	"testing"
++	"time"
++)
++
++func TestClientSettingBounds(t *testing.T) {
++	for _, settings := range []struct {
++		name                   string
++		minIdle                int
++		handshake, check, idle time.Duration
++		valid                  bool
++	}{
++		{"minimum", 0, 3 * time.Second, 5 * time.Second, 5 * time.Second, true},
++		{"maximum", 20, 20 * time.Second, 300 * time.Second, 600 * time.Second, true},
++		{"defaults", 5, 8 * time.Second, 30 * time.Second, 30 * time.Second, true},
++		{"negative idle count", -1, 8 * time.Second, 30 * time.Second, 30 * time.Second, false},
++		{"too many idle sessions", 21, 8 * time.Second, 30 * time.Second, 30 * time.Second, false},
++		{"short handshake", 0, 3*time.Second - time.Nanosecond, 30 * time.Second, 30 * time.Second, false},
++		{"long handshake", 0, 20*time.Second + time.Nanosecond, 30 * time.Second, 30 * time.Second, false},
++		{"short check", 0, 8 * time.Second, 5*time.Second - time.Nanosecond, 30 * time.Second, false},
++		{"long check", 0, 8 * time.Second, 300*time.Second + time.Nanosecond, 30 * time.Second, false},
++		{"short idle timeout", 0, 8 * time.Second, 30 * time.Second, 5*time.Second - time.Nanosecond, false},
++		{"long idle timeout", 0, 8 * time.Second, 30 * time.Second, 600*time.Second + time.Nanosecond, false},
++	} {
++		t.Run(settings.name, func(t *testing.T) {
++			err := validateClientSettings(settings.minIdle, settings.handshake, settings.check, settings.idle)
++			if (err == nil) != settings.valid {
++				t.Fatalf("validation error = %v, want valid=%v", err, settings.valid)
++			}
++		})
++	}
++}
+diff --git a/cmd/client/tls.go b/cmd/client/tls.go
+new file mode 100644
+index 0000000..06ee6c9
+--- /dev/null
++++ b/cmd/client/tls.go
+@@ -0,0 +1,121 @@
++package main
++
++import (
++	"anytls/proxy"
++	"context"
++	"crypto/tls"
++	"fmt"
++	"net"
++	"strings"
++	"time"
++
++	utls "github.com/refraction-networking/utls"
++)
++
++func newTLSConfig(serverAddr, serverName, alpn string, insecure bool) (*tls.Config, error) {
++	if serverName == "" {
++		if insecure {
++			// Preserve the original client's no-SNI behavior for legacy flags.
++			serverName = "127.0.0.1"
++		} else {
++			var err error
++			serverName, _, err = net.SplitHostPort(serverAddr)
++			if err != nil {
++				return nil, fmt.Errorf("invalid TLS server address: %w", err)
++			}
++		}
++	}
++	config := &tls.Config{ServerName: serverName, InsecureSkipVerify: insecure}
++	if alpn != "" {
++		for _, protocol := range strings.Split(alpn, ",") {
++			protocol = strings.TrimSpace(protocol)
++			if len(protocol) == 0 || len(protocol) > 255 {
++				return nil, fmt.Errorf("ALPN protocol length must be 1..255 bytes")
++			}
++			config.NextProtos = append(config.NextProtos, protocol)
++		}
++	}
++	return config, nil
++}
++
++func parseTLSFingerprint(value string) (string, error) {
++	switch strings.ToLower(strings.TrimSpace(value)) {
++	case "", "standard":
++		return "standard", nil
++	case "chrome":
++		return "chrome", nil
++	default:
++		return "", fmt.Errorf("TLS fingerprint must be standard or chrome")
++	}
++}
++
++func chromeTLSClient(conn net.Conn, config *tls.Config) (*utls.UConn, error) {
++	client := utls.UClient(conn, &utls.Config{
++		ServerName: config.ServerName, InsecureSkipVerify: config.InsecureSkipVerify,
++		RootCAs: config.RootCAs, NextProtos: append([]string(nil), config.NextProtos...),
++		MinVersion: config.MinVersion, MaxVersion: config.MaxVersion, KeyLogWriter: config.KeyLogWriter,
++	}, utls.HelloChrome_Auto)
++	if err := client.BuildHandshakeState(); err != nil {
++		return nil, err
++	}
++	if len(config.NextProtos) > 0 {
++		// Browser presets carry their own ALPN. Retain the explicit profile settings.
++		extensions := client.Extensions[:0]
++		for _, extension := range client.Extensions {
++			switch extension := extension.(type) {
++			case *utls.ALPNExtension:
++				extension.AlpnProtocols = append([]string(nil), config.NextProtos...)
++			case *utls.ApplicationSettingsExtension:
++				protocols := extension.SupportedProtocols[:0]
++				for _, supported := range extension.SupportedProtocols {
++					for _, allowed := range config.NextProtos {
++						if supported == allowed {
++							protocols = append(protocols, supported)
++						}
++					}
++				}
++				extension.SupportedProtocols = protocols
++				if len(protocols) == 0 {
++					continue
++				}
++			}
++			extensions = append(extensions, extension)
++		}
++		client.Extensions = extensions
++	}
++	return client, nil
++}
++
++func dialTLS(ctx context.Context, serverAddr string, config *tls.Config, fingerprint string, timeout time.Duration) (net.Conn, error) {
++	if timeout <= 0 {
++		return nil, fmt.Errorf("TLS handshake timeout must be positive")
++	}
++	fingerprint, err := parseTLSFingerprint(fingerprint)
++	if err != nil {
++		return nil, err
++	}
++	conn, err := proxy.SystemDialer.DialContext(ctx, "tcp", serverAddr)
++	if err != nil {
++		return nil, fmt.Errorf("TCP dial: %w", err)
++	}
++	handshakeCtx, cancel := context.WithTimeout(ctx, timeout)
++	defer cancel()
++	var tlsConn interface {
++		net.Conn
++		HandshakeContext(context.Context) error
++	}
++	if fingerprint == "chrome" {
++		tlsConn, err = chromeTLSClient(conn, config)
++		if err != nil {
++			conn.Close()
++			return nil, fmt.Errorf("TLS ClientHello: %w", err)
++		}
++	} else {
++		tlsConn = tls.Client(conn, config)
++	}
++	if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
++		tlsConn.Close()
++		return nil, fmt.Errorf("TLS handshake: %w", err)
++	}
++	return tlsConn, nil
++}
+diff --git a/cmd/client/tls_test.go b/cmd/client/tls_test.go
+new file mode 100644
+index 0000000..0708dd8
+--- /dev/null
++++ b/cmd/client/tls_test.go
+@@ -0,0 +1,215 @@
++package main
++
++import (
++	"bufio"
++	"context"
++	"crypto/tls"
++	"crypto/x509"
++	"errors"
++	"io"
++	"log"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	utls "github.com/refraction-networking/utls"
++)
++
++func TestTLSConfiguration(t *testing.T) {
++	legacy, err := newTLSConfig("example.test:443", "", "", true)
++	if err != nil || !legacy.InsecureSkipVerify || legacy.ServerName != "127.0.0.1" || len(legacy.NextProtos) != 0 {
++		t.Fatalf("legacy flags changed: config=%+v err=%v", legacy, err)
++	}
++	verified, err := newTLSConfig("example.test:443", "", "h2,http/1.1", false)
++	if err != nil || verified.InsecureSkipVerify || verified.ServerName != "example.test" || strings.Join(verified.NextProtos, ",") != "h2,http/1.1" {
++		t.Fatalf("explicit TLS settings ignored: config=%+v err=%v", verified, err)
++	}
++	for _, alpn := range []string{"h2,", strings.Repeat("x", 256)} {
++		if _, err := newTLSConfig("example.test:443", "", alpn, false); err == nil {
++			t.Errorf("invalid ALPN accepted: length %d", len(alpn))
++		}
++	}
++}
++
++func TestTLSFingerprintNames(t *testing.T) {
++	for value, want := range map[string]string{"": "standard", "standard": "standard", "chrome": "chrome", " Chrome ": "chrome"} {
++		if got, err := parseTLSFingerprint(value); err != nil || got != want {
++			t.Errorf("fingerprint %q = %q, %v; want %q", value, got, err, want)
++		}
++	}
++	if _, err := parseTLSFingerprint("unknown"); err == nil {
++		t.Fatal("unknown fingerprint accepted")
++	}
++}
++
++func TestDialTLSVerificationAndALPN(t *testing.T) {
++	for _, fingerprint := range []string{"standard", "chrome"} {
++		t.Run(fingerprint, func(t *testing.T) { testDialTLSVerificationAndALPN(t, fingerprint) })
++	}
++}
++
++func testDialTLSVerificationAndALPN(t *testing.T, fingerprint string) {
++	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		w.WriteHeader(http.StatusNoContent)
++	}))
++	server.EnableHTTP2 = true
++	server.Config.ErrorLog = log.New(io.Discard, "", 0)
++	server.StartTLS()
++	defer server.Close()
++	address := server.Listener.Addr().String()
++
++	config, err := newTLSConfig(address, "", "h2", false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	config.RootCAs = x509.NewCertPool()
++	config.RootCAs.AddCert(server.Certificate())
++	conn, err := dialTLS(context.Background(), address, config, fingerprint, time.Second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var protocol string
++	switch conn := conn.(type) {
++	case *tls.Conn:
++		protocol = conn.ConnectionState().NegotiatedProtocol
++	case *utls.UConn:
++		protocol = conn.ConnectionState().NegotiatedProtocol
++	}
++	if got := protocol; got != "h2" {
++		t.Fatalf("negotiated ALPN = %q, want h2", got)
++	}
++	conn.Close()
++
++	config.RootCAs = x509.NewCertPool()
++	if conn, err := dialTLS(context.Background(), address, config, fingerprint, time.Second); err == nil {
++		conn.Close()
++		t.Fatal("untrusted server accepted with insecure=false")
++	} else {
++		var unknownAuthority x509.UnknownAuthorityError
++		if !errors.As(err, &unknownAuthority) {
++			t.Fatalf("expected certificate verification error, got %v", err)
++		}
++	}
++	config.InsecureSkipVerify = true
++	conn, err = dialTLS(context.Background(), address, config, fingerprint, time.Second)
++	if err != nil {
++		t.Fatalf("explicit insecure=true did not work: %v", err)
++	}
++	conn.Close()
++}
++
++func TestHandshakeContextDoesNotCancelEstablishedConnection(t *testing.T) {
++	for _, fingerprint := range []string{"standard", "chrome"} {
++		t.Run(fingerprint, func(t *testing.T) { testEstablishedTLSConnection(t, fingerprint) })
++	}
++}
++
++func testEstablishedTLSConnection(t *testing.T, fingerprint string) {
++	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		w.WriteHeader(http.StatusNoContent)
++	}))
++	defer server.Close()
++	config, _ := newTLSConfig(server.Listener.Addr().String(), "", "", true)
++	conn, err := dialTLS(context.Background(), server.Listener.Addr().String(), config, fingerprint, time.Second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	conn.SetDeadline(time.Now().Add(time.Second))
++	if _, err := io.WriteString(conn, "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n"); err != nil {
++		t.Fatal(err)
++	}
++	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	response.Body.Close()
++	if response.StatusCode != http.StatusNoContent {
++		t.Fatalf("status = %d, want 204", response.StatusCode)
++	}
++}
++
++func TestTLSHandshakeTimeoutClosesSocket(t *testing.T) {
++	for _, fingerprint := range []string{"standard", "chrome"} {
++		t.Run(fingerprint, func(t *testing.T) { testTLSHandshakeTimeout(t, fingerprint) })
++	}
++}
++
++func testTLSHandshakeTimeout(t *testing.T, fingerprint string) {
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	peerClosed := make(chan struct{})
++	go func() {
++		conn, err := listener.Accept()
++		if err == nil {
++			defer conn.Close()
++			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
++			io.Copy(io.Discard, conn)
++		}
++		close(peerClosed)
++	}()
++	config, _ := newTLSConfig(listener.Addr().String(), "", "", true)
++	started := time.Now()
++	conn, err := dialTLS(context.Background(), listener.Addr().String(), config, fingerprint, 100*time.Millisecond)
++	if conn != nil {
++		conn.Close()
++	}
++	if !errors.Is(err, context.DeadlineExceeded) {
++		t.Fatalf("expected handshake deadline, got %v", err)
++	}
++	if elapsed := time.Since(started); elapsed > time.Second {
++		t.Fatalf("handshake timeout took %s", elapsed)
++	}
++	select {
++	case <-peerClosed:
++	case <-time.After(time.Second):
++		t.Fatal("timed-out TLS socket was not closed")
++	}
++}
++
++func TestChromeClientHelloPreservesExplicitALPN(t *testing.T) {
++	for _, alpn := range []string{"h2", "http/1.1"} {
++		t.Run(alpn, func(t *testing.T) {
++			type hello struct {
++				protocols []string
++				ciphers   []uint16
++				server    string
++			}
++			seen := make(chan hello, 1)
++			server := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
++			server.EnableHTTP2 = true
++			server.Config.ErrorLog = log.New(io.Discard, "", 0)
++			server.TLS = &tls.Config{GetConfigForClient: func(info *tls.ClientHelloInfo) (*tls.Config, error) {
++				seen <- hello{append([]string(nil), info.SupportedProtos...), append([]uint16(nil), info.CipherSuites...), info.ServerName}
++				return nil, nil
++			}}
++			server.StartTLS()
++			defer server.Close()
++			config, _ := newTLSConfig(server.Listener.Addr().String(), "example.com", alpn, false)
++			config.RootCAs = x509.NewCertPool()
++			config.RootCAs.AddCert(server.Certificate())
++			conn, err := dialTLS(context.Background(), server.Listener.Addr().String(), config, "chrome", time.Second)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer conn.Close()
++			actual := <-seen
++			if strings.Join(actual.protocols, ",") != alpn || actual.server != "example.com" {
++				t.Fatalf("wire ClientHello changed configured ALPN/SNI: %+v", actual)
++			}
++			grease := false
++			for _, cipher := range actual.ciphers {
++				grease = grease || cipher&0x0f0f == 0x0a0a
++			}
++			if !grease {
++				t.Fatal("wire ClientHello lacks the Chrome profile's GREASE cipher")
++			}
++		})
++	}
++}
+diff --git a/go.mod b/go.mod
+index 53f1408..7637686 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,11 +1,18 @@
+ module anytls
+ 
+-go 1.24.0
++go 1.23.0
+ 
+ require (
+ 	github.com/chen3feng/stl4go v0.1.1
++	github.com/refraction-networking/utls v1.6.7
+ 	github.com/sagernet/sing v0.5.1
+ 	github.com/sirupsen/logrus v1.9.3
++	golang.org/x/sys v0.29.0
+ )
+ 
+-require golang.org/x/sys v0.29.0 // indirect
++require (
++	github.com/andybalholm/brotli v1.0.6 // indirect
++	github.com/cloudflare/circl v1.3.7 // indirect
++	github.com/klauspost/compress v1.17.4 // indirect
++	golang.org/x/crypto v0.21.0 // indirect
++)
+diff --git a/go.sum b/go.sum
+index 63c530b..99ace99 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1,10 +1,18 @@
++github.com/andybalholm/brotli v1.0.6 h1:Yf9fFpf49Zrxb9NlQaluyE92/+X7UVHlhMNJN2sxfOI=
++github.com/andybalholm/brotli v1.0.6/go.mod h1:fO7iG3H7G2nSZ7m0zPUDn85XEX2GTukHGRSepvi9Eig=
+ github.com/chen3feng/stl4go v0.1.1 h1:0L1+mDw7pomftKDruM23f1mA7miavOj6C6MZeadzN2Q=
+ github.com/chen3feng/stl4go v0.1.1/go.mod h1:5ml3psLgETJjRJnMbPE+JiHLrCpt+Ajc2weeTECXzWU=
++github.com/cloudflare/circl v1.3.7 h1:qlCDlTPz2n9fu58M0Nh1J/JzcFpfgkFHHX3O35r5vcU=
++github.com/cloudflare/circl v1.3.7/go.mod h1:sRTcRWXGLrKw6yIGJ+l7amYJFfAXbZG0kBSc8r4zxgA=
+ github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
+ github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
++github.com/klauspost/compress v1.17.4 h1:Ej5ixsIri7BrIjBkRZLTo6ghwrEtHFk7ijlczPW4fZ4=
++github.com/klauspost/compress v1.17.4/go.mod h1:/dCuZOvVtNoHsyb+cuJD3itjs3NbnF6KH9zAO4BDxPM=
+ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
++github.com/refraction-networking/utls v1.6.7 h1:zVJ7sP1dJx/WtVuITug3qYUq034cDq9B2MR1K67ULZM=
++github.com/refraction-networking/utls v1.6.7/go.mod h1:BC3O4vQzye5hqpmDTWUqi4P5DDhzJfkV1tdqtawQIH0=
+ github.com/sagernet/sing v0.5.1 h1:mhL/MZVq0TjuvHcpYcFtmSD1BFOxZ/+8ofbNZcg1k1Y=
+ github.com/sagernet/sing v0.5.1/go.mod h1:ARkL0gM13/Iv5VCZmci/NuoOlePoIsW0m7BWfln/Hak=
+ github.com/sirupsen/logrus v1.9.3 h1:dueUQJ1C2q9oE3F7wvmSGAaVtTmUizReu6fjN8uqzbQ=
+@@ -13,6 +21,8 @@ github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+
+ github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
+ github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=
+ github.com/stretchr/testify v1.9.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
++golang.org/x/crypto v0.21.0 h1:X31++rzVUdKhX5sWmSOFZxx8UW/ldWx55cbf08iNAMA=
++golang.org/x/crypto v0.21.0/go.mod h1:0BP7YvVV9gBbVKyeTG0Gyn+gZm94bibOW5BjDEYAOMs=
+ golang.org/x/sys v0.0.0-20220715151400-c0bba94af5f8/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+ golang.org/x/sys v0.29.0 h1:TPYlXGxvx1MGTn2GiZDhnjPA9wZzZeGKHHmKhHYvgaU=
+ golang.org/x/sys v0.29.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
+diff --git a/proxy/session/client.go b/proxy/session/client.go
+index d0c649b..746e596 100644
+--- a/proxy/session/client.go
++++ b/proxy/session/client.go
+@@ -50,10 +50,10 @@ func NewClient(ctx context.Context, dialOut util.DialOutFunc,
+ 		idleSessionTimeout: idleSessionTimeout,
+ 		minIdleSession:     minIdleSession,
+ 	}
+-	if idleSessionCheckInterval <= time.Second*5 {
++	if idleSessionCheckInterval < time.Second*5 {
+ 		idleSessionCheckInterval = time.Second * 30
+ 	}
+-	if c.idleSessionTimeout <= time.Second*5 {
++	if c.idleSessionTimeout < time.Second*5 {
+ 		c.idleSessionTimeout = time.Second * 30
+ 	}
+ 	c.die, c.dieCancel = context.WithCancel(ctx)
+diff --git a/proxy/session/client_idle_test.go b/proxy/session/client_idle_test.go
+new file mode 100644
+index 0000000..1e8558a
+--- /dev/null
++++ b/proxy/session/client_idle_test.go
+@@ -0,0 +1,23 @@
++package session
++
++import (
++	"anytls/proxy/padding"
++	"context"
++	"net"
++	"testing"
++	"time"
++)
++
++func TestFiveSecondIdleTimeoutExpiresSession(t *testing.T) {
++	client := NewClient(context.Background(), nil, &padding.DefaultPaddingFactory, 5*time.Second, 5*time.Second, 0)
++	defer client.Close()
++	conn, peer := net.Pipe()
++	defer peer.Close()
++	session := &Session{conn: conn, die: make(chan struct{}), streams: make(map[uint32]*Stream), idleSince: time.Now().Add(-6 * time.Second)}
++	defer session.Close()
++	client.idleSession.Insert(1, session)
++	client.idleCleanup()
++	if !session.IsClosed() || !client.idleSession.IsEmpty() {
++		t.Fatal("5s idle timeout was ignored or expired session retained")
++	}
++}
+diff --git a/proxy/session/session.go b/proxy/session/session.go
+index 3ea88f0..1f07c70 100644
+--- a/proxy/session/session.go
++++ b/proxy/session/session.go
+@@ -111,6 +111,7 @@ func (s *Session) IsClosed() bool {
+ func (s *Session) Close() error {
+ 	var once bool
+ 	s.dieOnce.Do(func() {
++		_ = s.conn.SetDeadline(time.Now())
+ 		close(s.die)
+ 		once = true
+ 	})
+diff --git a/proxy/session/session_close_test.go b/proxy/session/session_close_test.go
+new file mode 100644
+index 0000000..ac232ad
+--- /dev/null
++++ b/proxy/session/session_close_test.go
+@@ -0,0 +1,31 @@
++package session
++
++import (
++	"net"
++	"testing"
++	"time"
++)
++
++func TestCloseUnblocksSocketBeforeShutdownHook(t *testing.T) {
++	conn, peer := net.Pipe()
++	defer peer.Close()
++	readDone := make(chan struct{})
++	go func() {
++		conn.Read(make([]byte, 1))
++		close(readDone)
++	}()
++	session := &Session{conn: conn, die: make(chan struct{}), streams: make(map[uint32]*Stream)}
++	session.dieHook = func() {
++		select {
++		case <-readDone:
++		case <-time.After(time.Second):
++			t.Error("socket read still blocked inside shutdown hook")
++		}
++	}
++	if err := session.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if !session.IsClosed() {
++		t.Fatal("session remained open")
++	}
++}
+diff --git a/util/version.go b/util/version.go
+index b1bdd81..ab94900 100644
+--- a/util/version.go
++++ b/util/version.go
+@@ -1,3 +1,3 @@
+ package util
+ 
+-var ProgramVersionName = "anytls/0.0.13"
++var ProgramVersionName = "anytls/0.0.13-r7000.3"

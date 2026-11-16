@@ -1,0 +1,33 @@
+{
+  "release": "4.38.3-r7000.3",
+  "base_plugin": {
+    "repository": "https://github.com/cary-sas/v2ray_bin",
+    "version": "4.38.3",
+    "archive_sha256": "05a30314c8c6d8f33ae9c027b42927e9d17e6e648c75ac7b419282fe5c1c2adf",
+    "distributed_here": false
+  },
+  "base_client": {
+    "repository": "https://github.com/cary-sas/anytls-go-add-nat",
+    "commit": "1a08fcf52fa56c0c1531a76839cd81cd1757dd4c",
+    "distributed_here": false
+  },
+  "toolchain": {
+    "go": "1.23.12",
+    "GOTOOLCHAIN": "local",
+    "CGO_ENABLED": "0",
+    "GOOS": "linux",
+    "GOARCH": "arm",
+    "GOARM": "5"
+  },
+  "patch_sha256": {
+    "fancyss-4.38.3.patch": "5cf126cf52a9c3f29622078fdc5df645aeb381fe432746133726521dd6fbd6d1",
+    "anytls-r7000.3.patch": "7495d430b1c322404ff9f7f456cd1925a25f6f314bfa23dbfcaec790e9056663"
+  },
+  "third_party_ca": {
+    "source": "https://curl.se/docs/caextract.html",
+    "license": "MPL-2.0",
+    "snapshot": "2026-11-05",
+    "sha256": "427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285",
+    "distributed_here": false
+  }
+}
