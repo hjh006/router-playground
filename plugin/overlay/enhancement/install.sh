@@ -12,7 +12,7 @@ export PATH
 fail() { printf 'Enhancement: %s\n' "$1" >&2; exit 1; }
 allowed_path() {
   case "$1" in
-    bin/anytls|bin/ss-flock|bin/ss-https-probe|scripts/ss_anytls.sh|scripts/ss_health.sh|scripts/ss_failover.sh|scripts/ss_adblock.sh|scripts/ss_routing.sh|scripts/ss_dns_hooks.sh|scripts/ss_webtest.sh|scripts/uninstall_shadowsocks.sh|ss/ssconfig.sh|ss/cru/foreign.sh|ss/rules/dnsmasq.postconf|ss/rules/cacert.pem|ss/rules/cacert.pem.sha256|webs/Main_Ss_Content.asp|res/ss-health.js|res/ss-health.css|res/icon-shadowsocks.png) return 0 ;;
+    bin/anytls|bin/ss-flock|bin/ss-https-probe|bin/ss-tcp-probe|bin/ss_latency.sh|scripts/ss_anytls.sh|scripts/ss_health.sh|scripts/ss_failover.sh|scripts/ss_adblock.sh|scripts/ss_latency.sh|scripts/ss_routing.sh|scripts/ss_dns_hooks.sh|scripts/ss_webtest.sh|scripts/uninstall_shadowsocks.sh|ss/ssconfig.sh|ss/cru/foreign.sh|ss/rules/dnsmasq.postconf|ss/rules/cacert.pem|ss/rules/cacert.pem.sha256|webs/Main_Ss_Content.asp|res/ss-health.js|res/ss-health.css|res/icon-shadowsocks.png|res/ss-latency-capabilities.js) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -105,7 +105,7 @@ RUNTIME_TOOL="$PAYLOAD/bin/ss-flock"
 KS_ROOT=$(CDPATH= cd -P "$KS_ROOT" && pwd) || fail 'Cannot resolve the installed root directory.'
 [ -f "$KS_ROOT/ss/version" ] && [ "$(cat "$KS_ROOT/ss/version")" = 4.38.3 ] || fail 'An installed fancyss 4.38.3 is required.'
 [ -d "$PAYLOAD" ] && [ ! -L "$PAYLOAD" ] && [ -f "$PACKAGE/manifest.md5" ] && [ ! -L "$PACKAGE/manifest.md5" ] || fail 'Payload or manifest is missing.'
-awk 'NF != 2 || length($1) != 32 || $1 !~ /^[0-9a-fA-F]+$/ || $2 !~ /^[A-Za-z0-9._\/-]+$/ || $2 ~ /(^|\/)\.\.?($|\/)/ || $2 ~ /\/\// || $2 ~ /^\// {exit 1} {if (seen[$2]++) exit 1; count++} END {if (count != 20) exit 1}' "$PACKAGE/manifest.md5" || fail 'Manifest format or file count is invalid.'
+awk 'NF != 2 || length($1) != 32 || $1 !~ /^[0-9a-fA-F]+$/ || $2 !~ /^[A-Za-z0-9._\/-]+$/ || $2 ~ /(^|\/)\.\.?($|\/)/ || $2 ~ /\/\// || $2 ~ /^\// {exit 1} {if (seen[$2]++) exit 1; count++} END {if (count != 24) exit 1}' "$PACKAGE/manifest.md5" || fail 'Manifest format or file count is invalid.'
 
 WORK=$(mktemp -d "$RUN_ROOT/r7000-enhancement.XXXXXX") || fail 'Cannot allocate private work directory.'
 LOCK="$RUN_ROOT/r7000-enhancement.lock"
@@ -174,7 +174,7 @@ while IFS= read -r relative; do
 done < "$WORK/paths"
 (cd "$PAYLOAD" && md5sum -c "$PACKAGE/manifest.md5") > "$WORK/checksums.log" 2>&1 || fail 'Payload checksum verification failed.'
 sh -n "$PAYLOAD/ss/ssconfig.sh" || fail 'The new service script has invalid shell syntax.'
-for relative in scripts/ss_anytls.sh scripts/ss_health.sh scripts/ss_failover.sh scripts/ss_adblock.sh scripts/ss_routing.sh scripts/ss_dns_hooks.sh scripts/ss_webtest.sh scripts/uninstall_shadowsocks.sh ss/cru/foreign.sh ss/rules/dnsmasq.postconf; do
+for relative in bin/ss_latency.sh scripts/ss_anytls.sh scripts/ss_health.sh scripts/ss_failover.sh scripts/ss_adblock.sh scripts/ss_latency.sh scripts/ss_routing.sh scripts/ss_dns_hooks.sh scripts/ss_webtest.sh scripts/uninstall_shadowsocks.sh ss/cru/foreign.sh ss/rules/dnsmasq.postconf; do
   sh -n "$PAYLOAD/$relative" || fail 'A payload script has invalid shell syntax.'
 done
 "$PAYLOAD/bin/anytls" -version > "$WORK/client-version" 2>&1 || fail 'The AnyTLS client cannot run on this router.'

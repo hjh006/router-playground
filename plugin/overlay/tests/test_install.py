@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-PATHS = '''bin/anytls bin/ss-flock bin/ss-https-probe scripts/ss_anytls.sh scripts/ss_health.sh scripts/ss_failover.sh scripts/ss_adblock.sh scripts/ss_routing.sh scripts/ss_dns_hooks.sh scripts/ss_webtest.sh scripts/uninstall_shadowsocks.sh ss/ssconfig.sh ss/cru/foreign.sh ss/rules/dnsmasq.postconf ss/rules/cacert.pem ss/rules/cacert.pem.sha256 webs/Main_Ss_Content.asp res/ss-health.js res/ss-health.css res/icon-shadowsocks.png'''.split()
+PATHS = '''bin/anytls bin/ss-flock bin/ss-https-probe bin/ss-tcp-probe bin/ss_latency.sh scripts/ss_anytls.sh scripts/ss_health.sh scripts/ss_failover.sh scripts/ss_adblock.sh scripts/ss_latency.sh scripts/ss_routing.sh scripts/ss_dns_hooks.sh scripts/ss_webtest.sh scripts/uninstall_shadowsocks.sh ss/ssconfig.sh ss/cru/foreign.sh ss/rules/dnsmasq.postconf ss/rules/cacert.pem ss/rules/cacert.pem.sha256 webs/Main_Ss_Content.asp res/ss-health.js res/ss-health.css res/icon-shadowsocks.png res/ss-latency-capabilities.js'''.split()
 SAFE = 'bin/ss-flock bin/ss-https-probe scripts/ss_routing.sh scripts/ss_dns_hooks.sh scripts/ss_health.sh scripts/ss_anytls.sh scripts/ss_failover.sh scripts/ss_adblock.sh ss/ssconfig.sh'.split()
 MOCK = r'''
 import hashlib,json,os,pathlib,subprocess,sys
@@ -147,9 +147,9 @@ class InstallerTests(unittest.TestCase):
             old.write_text('old:'+path+'\n'); old.chmod(0o640)
             if path=='bin/anytls': new.write_text('#!/bin/sh\necho anytls/0.0.13-r7000.3\n')
             elif path=='bin/ss-flock': new.write_text('#!'+sys.executable+'\n'+FLOCK)
-            elif path=='bin/ss-https-probe': new.write_text(PROBE)
+            elif path in ('bin/ss-https-probe','bin/ss-tcp-probe'): new.write_text(PROBE)
             elif path=='ss/ssconfig.sh': new.write_text('#!/bin/sh\nexec mock-service "$1"\n'); old.write_text('#!/bin/sh\necho old:$1 >> "$MO_ROOT/events"\nexit 19\n')
-            elif path in ('scripts/ss_routing.sh','scripts/ss_anytls.sh','scripts/ss_failover.sh','scripts/ss_dns_hooks.sh','scripts/ss_adblock.sh'): shutil.copyfile(ROOT/'shadowsocks'/path,new)
+            elif path in ('scripts/ss_routing.sh','scripts/ss_anytls.sh','scripts/ss_failover.sh','scripts/ss_dns_hooks.sh','scripts/ss_adblock.sh','scripts/ss_latency.sh'): shutil.copyfile(ROOT/'shadowsocks'/path,new)
             elif path.endswith('.sh') or path.endswith('postconf'): new.write_text('#!/bin/sh\n# new '+path+'\n')
             else: new.write_text('new:'+path+'\n')
             new.chmod(0o755 if path.startswith('bin/') else 0o644)

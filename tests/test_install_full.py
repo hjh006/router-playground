@@ -83,7 +83,7 @@ class FullInstallerTests(unittest.TestCase):
             p=self.pkg/'files'/name;p.parent.mkdir(parents=True,exist_ok=True)
             if name=='bin/anytls':p.write_text('#!/bin/sh\necho anytls/0.0.13-r7000.3\n')
             elif name=='bin/ss-flock':p.write_text('#!'+sys.executable+'\n'+helpers.FLOCK)
-            elif name=='bin/ss-https-probe':p.write_text(helpers.PROBE)
+            elif name in ('bin/ss-https-probe','bin/ss-tcp-probe'):p.write_text(helpers.PROBE)
             elif name in ['scripts/ss_failover.sh','scripts/ss_adblock.sh']:shutil.copyfile(ROOT/'plugin/overlay/shadowsocks'/name,p)
             elif name=='scripts/ss_dns_hooks.sh':shutil.copyfile(ROOT/'plugin/overlay/shadowsocks/scripts/ss_dns_hooks.sh',p)
             elif name=='scripts/ss_routing.sh':shutil.copyfile(ROOT/'plugin/overlay/shadowsocks/scripts/ss_routing.sh',p)

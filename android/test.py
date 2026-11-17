@@ -9,7 +9,7 @@ from build import BUILD, ROOT, find_java, reset_build_directory, run
 
 
 JSON_SHA256 = "3cf6cd6892e32e2b4c1c39e0f52f5248a2f5b37646fdfbb79a66b46b618414ed"
-TESTS = ("RouterApiTest", "LatencyProbeTest", "CountryGroupsTest")
+TESTS = ("RouterApiTest", "RouterSettingsApiTest", "PluginSettingsTest", "LatencyProbeTest", "CountryGroupsTest", "RouterLatencyApiTest")
 
 
 def main():
@@ -23,7 +23,7 @@ def main():
     cache = BUILD / "jvm-tests"
     reset_build_directory(cache)
     sources = [ROOT / "src/cn/simon/routercontrol" / (name + ".java")
-               for name in ("RouterApi", "LatencyProbe", "CountryGroups")]
+               for name in ("RouterApi", "PluginSettings", "LatencyProbe", "CountryGroups")]
     sources += [ROOT / "tests" / (name + ".java") for name in TESTS]
     run([java / "bin/javac", "-encoding", "UTF-8", "--add-modules", "jdk.httpserver",
          "-classpath", jar, "-d", cache, *sources])

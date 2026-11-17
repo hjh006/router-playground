@@ -15,6 +15,7 @@ import android.net.ConnectivityManager;
 import android.net.Network;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
@@ -34,21 +35,25 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CompletionService;
-import java.util.concurrent.ExecutorCompletionService;
+import java.util.UUID;
+import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /** Native controller for the router's saved AnyTLS routes. */
 public final class MainActivity extends Activity {
     private static final int LOGIN = 10;
+    private static final int CONTROLS = 11;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
-    private final ExecutorService probes = Executors.newFixedThreadPool(2);
-    private final Map<String, LatencyProbe.Result> latencyResults = new LinkedHashMap<>();
+    private final ExecutorService cancellations = Executors.newSingleThreadExecutor();
+    private final Map<String, RouteLatency> latencyResults = new LinkedHashMap<>();
     private final Set<String> expandedRegions = new LinkedHashSet<>();
     private final Set<String> queuedProbeIds = new LinkedHashSet<>();
     private boolean groupsInitialized, probeRunning;
     private volatile boolean cancelProbesRequested;
+    private volatile boolean routerReadPaused, probeStartInFlight;
+    private volatile String activeProbeJob = "", activeProbeNode = "";
+    private String cancelBeforeStartJob = "", cancelAfterStartJob = "";
     private int probeGeneration, probeCompleted, probeTotal;
     private String probeCountry = "";
     private ConnectivityManager connectivity;
@@ -57,13 +62,19 @@ public final class MainActivity extends Activity {
         @Override public void onAvailable(Network network) {
             runOnUiThread(() -> {
                 if (destroyed) return;
-                if (measuredNetwork != null && !measuredNetwork.equals(network)) invalidateMeasurements();
+                boolean resumed = routerReadPaused;
+                boolean changed = measuredNetwork != null && !measuredNetwork.equals(network);
                 measuredNetwork = network;
+                routerReadPaused = false;
+                if (session != null && (resumed || changed)) {
+                    feedback = probeRunning ? "手机连接已恢复，继续读取路由器测速结果…" : "手机网络已变化，路由器测速结果已保留。";
+                    draw();
+                }
             });
         }
         @Override public void onLost(Network network) {
             runOnUiThread(() -> {
-                if (!destroyed && network.equals(measuredNetwork)) { measuredNetwork = null; invalidateMeasurements(); }
+                if (!destroyed && network.equals(measuredNetwork)) { measuredNetwork = null; pauseLatencyReads(); }
             });
         }
     };
@@ -77,7 +88,8 @@ public final class MainActivity extends Activity {
     };
     private JSONObject session;
     private RouterApi.Snapshot snapshot;
-    private boolean busy, destroyed, switchDialogOpen;
+    private boolean busy, switchDialogOpen;
+    private volatile boolean destroyed;
     private int generation;
     private String feedback = "";
     private String error = "";
@@ -213,7 +225,7 @@ public final class MainActivity extends Activity {
         View divider = new View(this); divider.setBackgroundColor(outline);
         content.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
         gap(content, 14);
-        TextView footer = label("只管理路由器线路 · 不接管手机网络", 12, muted, false);
+        TextView footer = label("路由器线路与分流控制 · 不接管手机网络", 12, muted, false);
         footer.setGravity(Gravity.CENTER);
         content.addView(footer);
         setContentView(root);
@@ -258,6 +270,16 @@ public final class MainActivity extends Activity {
             hero.addView(new OrbitalView(this), new LinearLayout.LayoutParams(dp(112), dp(124)));
         }
         content.addView(hero);
+        gap(content, 12);
+        content.addView(button("直连 / 代理 · 插件控制", true,
+                () -> openControls("routing")), new LinearLayout.LayoutParams(-1, -2));
+        gap(content, 8);
+        content.addView(button("自动路由与故障切换", false,
+                () -> openControls("failover")), new LinearLayout.LayoutParams(-1, -2));
+        if (snapshot != null && snapshot.config.containsKey("ss_basic_failover_enable")) {
+            gap(content, 8);
+            content.addView(label(failoverSummary(snapshot), 14, muted, false));
+        }
         gap(content, 12);
         LinearLayout health = column();
         health.setPadding(dp(18), dp(15), dp(18), dp(15));
@@ -309,8 +331,8 @@ public final class MainActivity extends Activity {
             if (group == null) { group = new RouteGroup(key, region.flag.isEmpty() ? region.label : region.flag + " " + region.label); groups.put(key, group); }
             group.nodes.add(node);
             if (node.id.equals(snapshot.currentId)) currentGroup = key;
-            LatencyProbe.Result result = latencyResults.get(node.id);
-            if (result != null && !result.fingerprint.equals(LatencyProbe.fingerprint(node, snapshot.config))) latencyResults.remove(node.id);
+            RouteLatency result = latencyResults.get(node.id);
+            if (result != null && !result.fingerprint.equals(RouterApi.latencyFingerprint(node, snapshot.config))) latencyResults.remove(node.id);
         }
         if (!groupsInitialized) {
             if (!currentGroup.isEmpty()) expandedRegions.add(currentGroup);
@@ -323,10 +345,11 @@ public final class MainActivity extends Activity {
             status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
             progress.addView(status);
             gap(progress, 6);
-            progress.addView(label("手机 TCP 建连耗时，不能代表路由器代理的 HTTPS 延迟。", 12, muted, false));
+            progress.addView(label(routerReadPaused ? "手机连接中断，暂时暂停读取；路由器任务仍有固定时限。"
+                    : "路由器逐条测节点入口 TCP，取三次成功建连的中位数，不切换当前线路。", 12, muted, false));
             gap(progress, 8);
             Button cancel = button(cancelProbesRequested ? "正在停止…" : "停止测速", false, () -> {
-                cancelProbesRequested = true; draw();
+                requestCancelProbes();
             });
             cancel.setEnabled(!cancelProbesRequested); cancel.setAlpha(cancelProbesRequested ? .45f : 1f);
             progress.addView(cancel, new LinearLayout.LayoutParams(-1, -2));
@@ -339,7 +362,7 @@ public final class MainActivity extends Activity {
         }
         for (RouteGroup group : ordered) drawGroup(group);
         gap(content, 4);
-        content.addView(label("点“测延迟”仅测本组。结果来自手机 TCP 建连，线路可用性仍以路由器 HTTPS 检测为准。", 12, muted, false));
+        content.addView(label("点“测延迟”仅测本组。入口 TCP 为路由器到节点入口三次成功建连的中位数；路径待确认时不显示数值。完整代理连通性另看上方 HTTPS 检测，超过 5 分钟请重测。", 12, muted, false));
     }
 
     private void drawGroup(RouteGroup group) {
@@ -359,7 +382,7 @@ public final class MainActivity extends Activity {
         if (expanded) {
             gap(block, 8);
             Button measure = button("测延迟", false, () -> measureGroup(group));
-            measure.setContentDescription("测量" + group.title + "的手机 TCP 延迟");
+            measure.setContentDescription("测量路由器到" + group.title + "节点入口的 TCP 延迟");
             block.addView(measure, new LinearLayout.LayoutParams(-1, -2));
             gap(block, 10);
             boolean twoColumns = getResources().getConfiguration().screenWidthDp >= 360
@@ -391,20 +414,28 @@ public final class MainActivity extends Activity {
         if (!flag.isEmpty() && !CountryGroups.hasFlag(routeName)) routeName = flag + " " + routeName;
         item.addView(label(routeName, 16, text, true));
         gap(item, 10);
-        LatencyProbe.Result result = latencyResults.get(node.id);
+        RouteLatency result = latencyResults.get(node.id);
+        boolean expired = result != null && SystemClock.elapsedRealtime() - result.receivedAtMillis > 300000;
         String latency = "未测";
-        if (queuedProbeIds.contains(node.id)) latency = "测量中…";
+        if (queuedProbeIds.contains(node.id)) latency = node.id.equals(activeProbeNode)
+                ? (routerReadPaused ? "等待读取…" : "测量中…") : "排队中…";
         else if (result != null) {
             if ("ok".equals(result.status)) latency = result.latencyMs + " ms";
             else if ("timeout".equals(result.status)) latency = "超时";
             else if ("dns_failed".equals(result.status)) latency = "解析失败";
-            else latency = "连接失败";
+            else if ("path_unverified".equals(result.status)) latency = "路径待确认";
+            else if ("unsupported_node".equals(result.reason)) latency = "暂不支持";
+            else if ("invalid_settings".equals(result.reason) || "invalid_hosts".equals(result.reason)) latency = "设置待核对";
+            else latency = "检测失败";
+            if (expired) latency += " · 已过期";
         }
-        item.addView(label("手机 TCP · " + latency, 12, "ok".equals(result == null ? "" : result.status) ? primary : muted, false));
+        item.addView(label("入口 TCP · " + latency, 12,
+                result != null && "ok".equals(result.status) && !expired && !queuedProbeIds.contains(node.id) ? primary : muted, false));
         if (result != null && !queuedProbeIds.contains(node.id)) {
             gap(item, 3);
-            item.addView(label("测于 " + DateFormat.getTimeInstance(DateFormat.SHORT).format(new Date(result.checkedAtMillis))
-                    + (System.currentTimeMillis() - result.checkedAtMillis > 300000 ? " · 较早" : ""), 12, muted, false));
+            item.addView(label((result.checkedAtMillis > 0 ? "路由器测于 " : "读取于 ")
+                    + DateFormat.getTimeInstance(DateFormat.SHORT).format(new Date(result.checkedAtMillis > 0 ? result.checkedAtMillis : result.receivedWallClockMillis))
+                    + (expired ? " · 请重测" : ""), 12, muted, false));
         }
         View spacer = new View(this); item.addView(spacer, new LinearLayout.LayoutParams(1, 0, 1));
         gap(item, 12);
@@ -430,49 +461,129 @@ public final class MainActivity extends Activity {
         final int token = ++probeGeneration;
         draw();
         worker.execute(() -> {
-            CompletionService<ProbeRecord> completed = new ExecutorCompletionService<>(probes);
-            for (RouterApi.Node node : nodes) completed.submit(() -> {
-                if (cancelProbesRequested || Thread.currentThread().isInterrupted()) return new ProbeRecord(node.id, null);
-                try { return new ProbeRecord(node.id, LatencyProbe.measure(node, config)); }
-                catch (Exception ignored) { return new ProbeRecord(node.id, null); }
-            });
             try {
-                for (int i = 0; i < nodes.size(); i++) {
-                    final ProbeRecord record = completed.take().get();
+                RouterApi connection = api();
+                if (!connection.supportsRouterLatency()) throw new IOException("未检测到兼容的路由器入口 TCP 测速组件。请确认登录，或安装仅测速组件后再试。");
+                String outcome = probeCountry + " 的入口 TCP 延迟测量已完成。";
+                for (RouterApi.Node node : nodes) {
+                    if (destroyed || Thread.currentThread().isInterrupted()) return;
+                    if (cancelProbesRequested) { outcome = "本组后续测速已停止，已完成结果保留。"; break; }
+                    if (routerReadPaused) throw new IOException("手机连接暂时不可用，已保留完成结果；重新连接后再读取或测量。");
+                    final String jobId = UUID.randomUUID().toString().replace("-", "");
+                    activeProbeJob = jobId; activeProbeNode = node.id; probeStartInFlight = true;
+                    probeUi(token, this::draw);
+                    final long deadline = SystemClock.elapsedRealtime() + 40000;
+                    try {
+                        // A failed response can still mean the router started this nonce. Never resubmit.
+                        connection.startLatency(node.id, jobId);
+                    } catch (IOException ignored) {
+                        // Resolve an uncertain submission only by reading the matching job below.
+                    } finally {
+                        probeStartInFlight = false;
+                        if (cancelProbesRequested && !destroyed) cancelLatencyJob(jobId, true);
+                    }
+                    if (destroyed || Thread.currentThread().isInterrupted()) return;
+                    final long graceUntil = SystemClock.elapsedRealtime() + 3000;
+                    RouterApi.LatencyJob completed = null;
+                    while (SystemClock.elapsedRealtime() < deadline) {
+                        if (destroyed || Thread.currentThread().isInterrupted()) return;
+                        if (routerReadPaused) { Thread.sleep(1000); continue; }
+                        RouterApi.LatencyJob state;
+                        try { state = connection.readLatency(); }
+                        catch (IOException failure) {
+                            throw new IOException(cancelProbesRequested
+                                    ? "停止请求尚未确认，路由器任务可能仍在完成；请恢复连接后核对。"
+                                    : (failure.getMessage() == null ? "无法读取路由器测速状态。" : failure.getMessage() + "。")
+                                        + " 任务可能已提交，请检查连接后再试，不要连续重复启动。");
+                        }
+                        if (jobId.equals(state.jobId) && node.id.equals(state.nodeId)) {
+                            if (state.isTerminal()) { completed = state; break; }
+                        } else if (SystemClock.elapsedRealtime() >= graceUntil) {
+                            if ("running".equals(state.state)) throw new IOException("路由器正在执行其他测速，本组已停止，请稍后再试。");
+                            // Legacy firmware may acknowledge the POST before preparing the job.
+                            // An old idle/terminal snapshot is not a failure of this new nonce.
+                        }
+                        Thread.sleep(1000);
+                    }
+                    if (completed == null) throw new IOException(cancelProbesRequested
+                            ? "停止请求尚未确认，路由器会按任务时限结束；已完成结果保留。"
+                            : "本次测速结果尚未读到，路由器任务有固定时限；请重新连接后核对，已完成结果保留。");
+                    if ("busy".equals(completed.state)) throw new IOException("路由器正在执行其他测速，本组已停止，请稍后再试。");
+                    if ("changed".equals(completed.state)) {
+                        probeUi(token, () -> latencyResults.remove(node.id));
+                        throw new IOException("线路配置已变化，请刷新线路列表后重新测速。");
+                    }
+                    if ("cancelled".equals(completed.state)) { outcome = "路由器已确认当前测速取消，已完成结果保留。"; break; }
+                    final RouteLatency result = new RouteLatency(completed, RouterApi.latencyFingerprint(node, config));
                     probeUi(token, () -> {
-                        queuedProbeIds.remove(record.id);
-                        if (record.result != null && !cancelProbesRequested) { latencyResults.put(record.id, record.result); probeCompleted++; }
+                        queuedProbeIds.remove(node.id); latencyResults.put(node.id, result); probeCompleted++;
                         draw();
                     });
+                    activeProbeJob = ""; activeProbeNode = "";
+                    if (cancelProbesRequested) { outcome = "当前测速已结束，本组后续测速已停止，已完成结果保留。"; break; }
                 }
+                final String finished = outcome;
                 probeUi(token, () -> {
-                    boolean canceled = cancelProbesRequested;
-                    probeRunning = false; queuedProbeIds.clear();
-                    feedback = canceled ? "测速已停止，已完成结果保留。" : probeCountry + " 的手机 TCP 测量已完成。";
+                    probeRunning = false; queuedProbeIds.clear(); feedback = finished;
                     draw();
                 });
             } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-            catch (Exception ignored) {
-                probeUi(token, () -> { probeRunning = false; queuedProbeIds.clear(); feedback = "测速已结束，可重新测量当前分组。"; draw(); });
+            catch (Exception failure) {
+                final String reason = failure instanceof IOException && failure.getMessage() != null
+                        ? failure.getMessage() : "无法确认测速结果，请检查路由器连接后再试。";
+                probeUi(token, () -> { probeRunning = false; queuedProbeIds.clear(); feedback = ""; error = reason; draw(); });
+            } finally {
+                activeProbeJob = ""; activeProbeNode = ""; probeStartInFlight = false;
             }
         });
+    }
+    private void requestCancelProbes() {
+        if (!probeRunning || cancelProbesRequested) return;
+        cancelProbesRequested = true;
+        feedback = "正在请求停止本组测速，等待路由器确认；已完成结果保留。";
+        cancelLatencyJob(activeProbeJob, !probeStartInFlight); draw();
+    }
+    private void cancelLatencyJob(String jobId, boolean afterStart) {
+        if (jobId.isEmpty() || destroyed) return;
+        synchronized (this) {
+            if (afterStart) { if (jobId.equals(cancelAfterStartJob)) return; cancelAfterStartJob = jobId; }
+            else { if (jobId.equals(cancelBeforeStartJob) || jobId.equals(cancelAfterStartJob)) return; cancelBeforeStartJob = jobId; }
+        }
+        // Cancellation uses a separate connection so a slow start/poll cannot block the stop button.
+        try {
+            cancellations.execute(() -> {
+                try { api().cancelLatency(jobId); }
+                catch (Exception ignored) {
+                    runOnUiThread(() -> {
+                        if (!destroyed && probeRunning && cancelProbesRequested && jobId.equals(activeProbeJob)) {
+                            feedback = "停止请求尚未确认，正在读取路由器状态；任务仍有固定时限。"; draw();
+                        }
+                    });
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) { /* Activity already destroyed; the router keeps its hard time limit. */ }
     }
     private void probeUi(int token, Runnable action) {
         runOnUiThread(() -> { if (!destroyed && token == probeGeneration) action.run(); });
     }
-    private void invalidateMeasurements() {
-        cancelProbesRequested = true; latencyResults.clear();
-        if (session != null) { feedback = "手机网络已变化，延迟结果已清除。"; draw(); }
+    private void pauseLatencyReads() {
+        routerReadPaused = true;
+        if (session != null) { feedback = "手机连接已断开，已完成的路由器测速结果保留；重新连接后继续读取。"; draw(); }
     }
     private static final class RouteGroup {
         final String key, title;
         final List<RouterApi.Node> nodes = new ArrayList<>();
         RouteGroup(String key, String title) { this.key = key; this.title = title; }
     }
-    private static final class ProbeRecord {
-        final String id;
-        final LatencyProbe.Result result;
-        ProbeRecord(String id, LatencyProbe.Result result) { this.id = id; this.result = result; }
+    private static final class RouteLatency {
+        final String status, fingerprint, reason;
+        final long latencyMs, checkedAtMillis;
+        final long receivedAtMillis = SystemClock.elapsedRealtime();
+        final long receivedWallClockMillis = System.currentTimeMillis();
+        RouteLatency(RouterApi.LatencyJob result, String fingerprint) {
+            status = result.state; reason = result.reason; latencyMs = result.latencyMs; checkedAtMillis = result.checkedAtMillis;
+            this.fingerprint = fingerprint;
+        }
     }
 
     private String currentName(RouterApi.Snapshot value) {
@@ -481,6 +592,8 @@ public final class MainActivity extends Activity {
     }
     private boolean freshHealth(RouterApi.Snapshot value) {
         if (value == null || value.health == null) return false;
+        if (value.failover != null && ("direct".equals(value.failover.optString("mode"))
+                || "error".equals(value.failover.optString("mode")))) return false;
         JSONObject health = value.health;
         long checked = health.optLong("checked_at", 0);
         long age = System.currentTimeMillis() / 1000 - checked;
@@ -494,6 +607,8 @@ public final class MainActivity extends Activity {
     private String healthTitle(RouterApi.Snapshot value) {
         if (value == null) return "等待读取";
         if (!value.enabled) return "代理已关闭";
+        if (value.failover != null && "direct".equals(value.failover.optString("mode"))) return "故障直连保护 · 代理检测暂停";
+        if (value.failover != null && "error".equals(value.failover.optString("mode"))) return "当前网络路径待确认";
         if (value.health == null) return "暂无检测数据";
         if (!value.currentId.equals(value.health.optString("node_id"))) return "等待当前线路检测";
         if (!freshHealth(value)) return "检测数据已过期";
@@ -529,6 +644,32 @@ public final class MainActivity extends Activity {
 
     private RouterApi api() throws Exception {
         return new RouterApi(session.getString("baseUrl"), session.optString("cookie"), session.optString("basicAuth"));
+    }
+    private String failoverSummary(RouterApi.Snapshot value) {
+        if (!value.enabled) return "当前路径：直连 · 代理已手动关闭";
+        if (!"1".equals(value.config.get("ss_basic_failover_enable"))) return "自动故障切换：关闭";
+        JSONObject state = value.failover;
+        if (state == null) return "自动故障切换：状态待确认";
+        long age = System.currentTimeMillis() / 1000 - state.optLong("checked_at", 0);
+        if (age < -300 || age > 240) return "自动故障切换：状态已过期，请刷新核对";
+        if (!value.currentId.equals(state.optString("current_node"))) return "自动故障切换：等待当前线路状态";
+        if ("error".equals(state.optString("mode")) || "error".equals(state.optString("state")))
+            return "自动故障切换：网络路径恢复待确认";
+        if ("direct".equals(state.optString("mode"))) return "当前路径：故障直连保护 · 后台继续寻找可用线路";
+        switch (state.optString("state")) {
+            case "healthy": return "当前路径：代理 · 自动故障切换待命";
+            case "confirming": return "自动路由：正在确认线路故障";
+            case "scanning_proxy": case "scanning_direct":
+                return "自动路由：正在检测备用线路 · " + state.optInt("scanned", 0) + " / " + state.optInt("total", 0);
+            case "recovering": return "自动路由：候选线路恢复确认中";
+            case "cooldown": return "自动路由：切换冷却中";
+            case "switched": return "自动路由：已切换备用线路";
+            default: return "自动故障切换：等待新状态";
+        }
+    }
+    private void openControls(String group) {
+        if (busy || probeRunning || session == null) return;
+        startActivityForResult(new Intent(this, PluginSettingsActivity.class).putExtra("group", group), CONTROLS);
     }
     private void refresh() {
         if (busy || probeRunning || session == null) return;
@@ -616,14 +757,16 @@ public final class MainActivity extends Activity {
     private void settings() {
         if (busy || probeRunning) return;
         if (session == null) { openLogin(); return; }
-        new AlertDialog.Builder(this).setTitle("连接设置")
-                .setItems(new String[]{"管理地址 / 重新登录", "清除本机登录信息", "关于"}, (dialog, which) -> {
-                    if (which == 0) openLogin();
-                    else if (which == 1) new AlertDialog.Builder(this).setTitle("清除登录信息？")
+        new AlertDialog.Builder(this).setTitle("设置与管理")
+                .setItems(new String[]{"插件功能与分流设置", "原插件完整面板", "管理地址 / 重新登录", "清除本机登录信息", "关于"}, (dialog, which) -> {
+                    if (which == 0) openControls("routing");
+                    else if (which == 1) startActivityForResult(new Intent(this, PluginPanelActivity.class), CONTROLS);
+                    else if (which == 2) openLogin();
+                    else if (which == 3) new AlertDialog.Builder(this).setTitle("清除登录信息？")
                             .setMessage("将移除 App 保存的登录信息，路由器继续按当前线路运行。")
                             .setNegativeButton("取消", null).setPositiveButton("清除", (d, w) -> forget()).show();
-                    else new AlertDialog.Builder(this).setTitle("自用路由线路 1.1.0")
-                            .setMessage("个人 R7000 AnyTLS 线路控制器\n\n只读取和切换路由器已有线路。切换使用插件原有应用流程，手机不创建 VPN。\n\nUI 和图标依据 ImageGen 设计实现。线路按国家与地区归类。手机 TCP 测量与路由器 HTTPS 检测分别展示，仅反映各自最近采样。")
+                    else new AlertDialog.Builder(this).setTitle("自用路由线路 1.4.0")
+                            .setMessage("个人 R7000 AnyTLS 路由控制器\n\n线路、直连与代理、设备分流、自动故障切换、广告过滤及高级连接设置。完整插件面板提供其他功能。手机不创建 VPN。\n\nUI 和图标依据 ImageGen 设计实现。线路按国家与地区归类。入口 TCP 延迟由路由器采样，取三次成功建连的中位数，只对已验证路径显示数值，不切换当前线路。完整代理连通性由独立 HTTPS 检测展示。")
                             .setPositiveButton("知道了", null).show();
                 }).show();
     }
@@ -645,6 +788,12 @@ public final class MainActivity extends Activity {
             healthAfterSwitch = 0; switchedNodeId = "";
             latencyResults.clear(); expandedRegions.clear(); groupsInitialized = false; probeGeneration++;
             readSession(); draw(); if (session != null) refresh();
+        } else if (requestCode == CONTROLS) {
+            // Controls and the embedded original panel may change routing or the active node.
+            healthAfterSwitch = 0; switchedNodeId = "";
+            cancelProbesRequested = true; latencyResults.clear();
+            readSession();
+            if (session != null) refresh();
         }
     }
     @Override protected void onResume() {
@@ -663,7 +812,7 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onDestroy() {
         destroyed = true; generation++; probeGeneration++; cancelProbesRequested = true;
-        refreshHandler.removeCallbacks(refreshTick); worker.shutdownNow(); probes.shutdownNow();
+        refreshHandler.removeCallbacks(refreshTick); worker.shutdownNow(); cancellations.shutdown();
         if (connectivity != null) try { connectivity.unregisterNetworkCallback(networkCallback); } catch (Exception ignored) {}
         super.onDestroy();
     }

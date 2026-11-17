@@ -1,20 +1,39 @@
 {
   "name": "自用路由线路",
-  "version": "1.1.0",
+  "version": "1.4.0",
   "package": "cn.simon.routercontrol",
-  "tag": "android-v1.1.0",
-  "apk": "router-control-1.1.0.apk",
-  "sha256": "6f2f117a50006babcfa1baccb542b0cf73e0b90f099596f7bad6f36b49b2a123",
+  "tag": "android-v1.4.0",
+  "apk": "router-control-1.4.0.apk",
+  "sha256": "d9c0f8317019812608a53b3627210c4012741a2bab20de5443303d2934ed69ce",
   "min_android_api": 26,
   "compile_sdk": "android-36.1",
   "target_sdk": 35,
   "checks": {
     "router_api": 86,
-    "tcp_hosts": 22,
+    "settings_api": 185,
+    "settings_validation": 125,
+    "legacy_phone_tcp_hosts": 22,
     "country_groups": 17,
-    "post_restore_preservation": 23
+    "router_latency_api": 133,
+    "go_race_top_level_tests": 19,
+    "root_python_tests": 79,
+    "prepared_installer_tests": 52
   },
-  "acceptance_scope": "Fresh login, saved-line round trip and TCP timing verified on Android 17 with enhanced R7000 r3. Active UU game traffic was not exercised.",
+  "acceptance_scope": "App 1.4.0 installed on OPPO with matching APK hash; fresh router-entry TCP results and cancellation verified. Router component samples three direct-path-verified entry TCP connections. Node resolver, Hosts, UU/bypass settings and existing critical processes preserved. Active UU game traffic and all saved routes were not exercised.",
   "private_settings_included": false,
-  "signing_private_key_included": false
+  "signing_private_key_included": false,
+  "version_code": 7,
+  "source": "router-playground-1.4.0-source.zip",
+  "router_addon": {
+    "asset": "latency.tar.gz",
+    "requires": "R7000 Merlin 380 with compatible enhanced r5 already installed",
+    "metric": "router_tcp",
+    "target": "entry",
+    "transport": "ram_mailbox_v1",
+    "samples": 3,
+    "timeout_seconds": 5,
+    "job_budget_seconds": 25,
+    "first_install": false,
+    "upstream_core_included": false
+  }
 }

@@ -68,13 +68,16 @@ def extract_regular(archive, members, destination):
         target.chmod(member.mode & 0o777)
 
 
-def prepare(base, anytls, flock, ca_bundle, destination, root=ROOT, https_probe=None):
+def prepare(base, anytls, flock, ca_bundle, destination, root=ROOT, https_probe=None, tcp_probe=None):
     base, anytls, flock, ca_bundle = map(regular_file, (base, anytls, flock, ca_bundle))
     if sha256(base) != BASE_SHA256:
         raise ValueError("Base archive SHA256 does not match the verified fancyss 4.38.3 release")
     if https_probe is None:
         raise ValueError("The locally built HTTPS probe binary is required")
     https_probe = regular_file(https_probe)
+    if tcp_probe is None:
+        raise ValueError("The locally built TCP probe binary is required")
+    tcp_probe = regular_file(tcp_probe)
     destination = Path(destination).expanduser().absolute()
     if os.path.lexists(destination):
         raise ValueError("Destination already exists; choose a new directory: " + str(destination))
@@ -110,7 +113,8 @@ def prepare(base, anytls, flock, ca_bundle, destination, root=ROOT, https_probe=
             binaries.mkdir(parents=True)
             for source, name in ((anytls, "anytls-client-linux-armv5-r7000.3"),
                                  (flock, "ss-flock-linux-armv5"),
-                                 (https_probe, "ss-https-probe-linux-armv5")):
+                                 (https_probe, "ss-https-probe-linux-armv5"),
+                                 (tcp_probe, "ss-tcp-probe-linux-armv5")):
                 target = binaries / name
                 shutil.copyfile(source, target)
                 target.chmod(0o755)
@@ -126,12 +130,13 @@ def main():
     parser.add_argument("--anytls-binary", required=True, help="Locally built R7000 AnyTLS client")
     parser.add_argument("--flock-binary", required=True, help="Locally built ARM ss-flock")
     parser.add_argument("--https-probe-binary", required=True, help="Locally built ARM HTTPS probe")
+    parser.add_argument("--tcp-probe-binary", required=True, help="Locally built ARM TCP probe")
     parser.add_argument("--ca-bundle", required=True, help="User-supplied PEM CA bundle")
     parser.add_argument("--dest", type=Path, default=ROOT / "build")
     args = parser.parse_args()
     try:
         script = prepare(args.base, args.anytls_binary, args.flock_binary, args.ca_bundle,
-                         args.dest, https_probe=args.https_probe_binary)
+                         args.dest, https_probe=args.https_probe_binary, tcp_probe=args.tcp_probe_binary)
     except (OSError, ValueError, tarfile.TarError, subprocess.CalledProcessError) as error:
         parser.exit(1, "Preparation failed: " + str(error) + "\n")
     print("Prepared locally; input binaries were not executed. Build with:")

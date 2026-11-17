@@ -152,7 +152,7 @@ public final class RouterApiTest {
             int probes = statusCount;
             config = fixture().replace("\"ss_basic_enable\":\"1\"", "\"ss_basic_enable\":\"0\"");
             check(!api.load().enabled && statusCount == probes, "disabled proxy does not trigger probe");
-            config = fixture().replace("ss_basic_bypass_macs", "missing_r3_capability");
+            config = fixture().replace("ss_basic_anytls_handshake", "missing_r3_capability");
             api.load();
             check(statusCount == probes, "unrecognized enhanced config never triggers status");
             config = "var db_ss={ssconf_basic_node:'1'};";
@@ -181,7 +181,7 @@ public final class RouterApiTest {
             config = fixture().replace("\"ssconf_basic_port_2\":\"443\"", "\"ssconf_basic_port_2\":\"65536\"");
             fails(() -> api.switchNode("2"), "reject invalid node port");
             check(postCount == count, "invalid targets never write");
-            config = fixture().replace("ss_basic_bypass_macs", "missing_r3_capability");
+            config = fixture().replace("ss_basic_anytls_handshake", "missing_r3_capability");
             fails(() -> api.switchNode("2"), "reject unrecognized enhancement capabilities");
             config = fixture().replace("\"ss_basic_trojan_binary\":\"AnyTLS\"", "\"ss_basic_trojan_binary\":\"Trojan\"");
             fails(() -> api.switchNode("2"), "reject current non-AnyTLS protocol");

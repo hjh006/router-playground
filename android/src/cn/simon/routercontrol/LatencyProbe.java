@@ -22,7 +22,8 @@ import java.util.concurrent.TimeoutException;
 
 /** Phone-to-entry TCP timing only; never authenticates AnyTLS or changes network settings. */
 public final class LatencyProbe {
-    private static final int TIMEOUT_MS = 2000;
+    private static final int DNS_TIMEOUT_MS = 2000;
+    private static final int CONNECT_TIMEOUT_MS = 5000;
     // Native DNS resolution is not interruptible on every device. Keep at most two such
     // calls alive, with no queue or per-timeout replacement threads; saturated DNS fails fast.
     private static final ThreadPoolExecutor DNS = new ThreadPoolExecutor(2, 2, 30, TimeUnit.SECONDS,
@@ -93,7 +94,7 @@ public final class LatencyProbe {
             catch (RejectedExecutionException ignored) { return failure("dns_failed", "dns_busy", identity); }
             try {
                 address = null;
-                for (InetAddress candidate : pending.get(TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                for (InetAddress candidate : pending.get(DNS_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                     if (candidate instanceof Inet4Address) { address = candidate; break; }
                 }
                 // Match the maintained router's IPv4 node path, rather than ranking an IPv6-only path.
@@ -112,7 +113,7 @@ public final class LatencyProbe {
         if (Thread.currentThread().isInterrupted()) return failure("failed", "cancelled", identity);
         try (Socket socket = new Socket()) {
             long started = System.nanoTime();
-            socket.connect(new InetSocketAddress(address, port), TIMEOUT_MS);
+            socket.connect(new InetSocketAddress(address, port), CONNECT_TIMEOUT_MS);
             long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
             if (Thread.currentThread().isInterrupted()) return failure("failed", "cancelled", identity);
             return new Result("ok", Math.max(0, elapsed), "", identity);

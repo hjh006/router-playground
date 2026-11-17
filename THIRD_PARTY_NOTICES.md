@@ -15,3 +15,11 @@
 - Android 的 JVM 合成测试由使用者另外提供 `org.json:json:20240303` 测试 JAR；该 JAR 不包含在 APK、仓库或 Android 源码发布包中，其自身许可继续适用。
 
 Releases 的发布不改变第三方代码的许可状态，也不表示已取得上游额外授权。第三方组件不适用本仓库的 MIT 授权。重建或再次分发时，应保留上游已有版权和许可说明，核对相应材料的适用条件；这里的源码许可不构成对上游安装包或协议实现的重新授权。
+
+## 独立入口 TCP 测速包
+
+`latency-tcp-1.4.0.tar.gz` 的运行 payload 仅有本项目原创的四个文件：`bin/ss-tcp-probe`、`bin/ss_latency.sh`、`scripts/ss_latency.sh` 和 `res/ss-latency-capabilities.js`。它安装到使用者已有的增强插件中，不捆绑原版插件、AnyTLS 内核、节点或个人配置。
+
+`ss-tcp-probe` 仅使用 Go 标准库，由固定的 Go 1.23.12 编译。其标准库及运行时遵循 [Go 1.23.12 BSD 许可](https://github.com/golang/go/blob/go1.23.12/LICENSE)；本仓库的 `licenses/Go-LICENSE.txt` 是该固定 Go 源码树 `LICENSE` 的原文副本。独立包同时附带本项目 MIT `LICENSE`、本来源说明和 Go BSD 许可全文，不分发 Go 工具链。
+
+本次独立测速包与 Android 1.4.0 的发布不得顺带分发许可尚未明确的完整上游 AnyTLS 内核或 Fancyss 原版安装包。前文保留的历史来源说明，不构成对这些上游材料的再分发授权。

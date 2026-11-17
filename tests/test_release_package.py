@@ -24,9 +24,9 @@ class GenericReleaseTest(unittest.TestCase):
             root = work / 'r7000-enhanced'
             files = [root / 'enhancement/install.sh', root / 'shadowsocks/uninstall.sh']
             files += [root / 'shadowsocks' / name for name in builder.FILES
-                      if not name.startswith('bin/') and name != 'scripts/uninstall_shadowsocks.sh']
+                      if name not in ('bin/anytls', 'bin/ss-flock', 'bin/ss-https-probe', 'bin/ss-tcp-probe', 'scripts/uninstall_shadowsocks.sh')]
             files += [work / 'r7000-client/dist' / name for name in
-                      ('anytls-client-linux-armv5-r7000.3', 'ss-flock-linux-armv5', 'ss-https-probe-linux-armv5')]
+                      ('anytls-client-linux-armv5-r7000.3', 'ss-flock-linux-armv5', 'ss-https-probe-linux-armv5', 'ss-tcp-probe-linux-armv5')]
             for file in files:
                 file.parent.mkdir(parents=True, exist_ok=True)
                 file.write_bytes(b'synthetic-public-payload\n')
@@ -48,7 +48,7 @@ class GenericReleaseTest(unittest.TestCase):
             with tarfile.open(fileobj=io.BytesIO(first), mode='r:gz') as tar:
                 members = tar.getmembers()
                 regular = {m.name: tar.extractfile(m).read() for m in members if m.isfile()}
-                self.assertEqual(len(regular), 23)
+                self.assertEqual(len(regular), 27)
                 self.assertFalse(any('private-settings' in n for n in regular))
                 for member in members:
                     self.assertEqual((member.uid, member.gid, member.uname, member.gname,
@@ -61,8 +61,12 @@ class GenericReleaseTest(unittest.TestCase):
                 self.assertIn('shadowsocks/payload/bin/ss-https-probe',regular)
                 self.assertIn('shadowsocks/payload/scripts/ss_failover.sh',regular)
                 self.assertIn('shadowsocks/payload/scripts/ss_adblock.sh',regular)
+                self.assertIn('shadowsocks/payload/bin/ss-tcp-probe',regular)
+                self.assertIn('shadowsocks/payload/bin/ss_latency.sh',regular)
+                self.assertIn('shadowsocks/payload/scripts/ss_latency.sh',regular)
+                self.assertIn('shadowsocks/payload/res/ss-latency-capabilities.js',regular)
                 manifest = regular['shadowsocks/manifest.md5'].decode().splitlines()
-                self.assertEqual(len(manifest), 20)
+                self.assertEqual(len(manifest), 24)
                 for line in manifest:
                     digest, name = line.split()
                     self.assertEqual(hashlib.md5(regular['shadowsocks/payload/' + name]).hexdigest(), digest)

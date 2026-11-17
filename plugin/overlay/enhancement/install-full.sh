@@ -13,9 +13,9 @@ fail() { printf 'Full installation: %s\n' "$1" >&2; exit 1; }
 allowed_path() {
   case "/$1/" in *'/../'*|*'/./'*|*'//'*) return 1 ;; esac
   case "$1" in
-    bin/anytls|bin/ss-flock|bin/ss-https-probe|bin/base64_encode|bin/cdns|bin/chinadns|bin/chinadns1|bin/chinadns-ng|bin/client_linux_arm5|bin/dns2socks|bin/dnsmasq|bin/haproxy|bin/haveged|bin/hysteria|bin/httping|bin/https_dns_proxy|bin/jq|bin/koolbox|bin/koolgame|bin/naive|bin/obfs-local|bin/pdu|bin/resolveip|bin/rss-local|bin/rss-redir|bin/smartdns|bin/speederv1|bin/speederv2|bin/ss-local|bin/ss-redir|bin/ss-tunnel|bin/udp2raw|bin/xray) return 0 ;;
+    bin/anytls|bin/ss-flock|bin/ss-https-probe|bin/ss-tcp-probe|bin/ss_latency.sh|bin/base64_encode|bin/cdns|bin/chinadns|bin/chinadns1|bin/chinadns-ng|bin/client_linux_arm5|bin/dns2socks|bin/dnsmasq|bin/haproxy|bin/haveged|bin/hysteria|bin/httping|bin/https_dns_proxy|bin/jq|bin/koolbox|bin/koolgame|bin/naive|bin/obfs-local|bin/pdu|bin/resolveip|bin/rss-local|bin/rss-redir|bin/smartdns|bin/speederv1|bin/speederv2|bin/ss-local|bin/ss-redir|bin/ss-tunnel|bin/udp2raw|bin/xray) return 0 ;;
     scripts/ss_*.sh|scripts/uninstall_shadowsocks.sh|ss/ssconfig.sh|ss/version|ss/cru/*.sh|ss/rules/*|webs/Main_Ss*.asp|res/layer/*) return 0 ;;
-    res/shadowsocks.css|res/ss-menu.js|res/ss-health.js|res/ss-health.css|res/icon-shadowsocks.png|res/ss_proc_status.htm|res/ss_udp_status.htm|res/all.png|res/chn.png|res/game.png|res/gameV2.png|res/gfw.png|res/gfwlist.png) return 0 ;;
+    res/shadowsocks.css|res/ss-menu.js|res/ss-health.js|res/ss-health.css|res/ss-latency-capabilities.js|res/icon-shadowsocks.png|res/ss_proc_status.htm|res/ss_udp_status.htm|res/all.png|res/chn.png|res/game.png|res/gameV2.png|res/gfw.png|res/gfwlist.png) return 0 ;;
     bin/rss-tunnel|bin/base64|bin/shuf|bin/netstat|bin/base64_decode|init.d/S99socks5.sh) return 0 ;;
     *) return 1 ;;
   esac
@@ -174,13 +174,13 @@ while IFS= read -r relative; do
   allowed_path "$relative" || fail 'A full payload path is outside the plugin allowlist.'
   case "$relative" in bin/rss-tunnel|bin/base64|bin/shuf|bin/netstat|bin/base64_decode|init.d/S99socks5.sh|scripts/ss_install.sh) fail 'The full payload contains a reserved generated path.' ;; esac
 done < "$WORK/paths"
-for required in bin/anytls bin/ss-flock bin/ss-https-probe bin/koolbox bin/base64_encode bin/rss-local scripts/ss_socks5.sh scripts/ss_failover.sh scripts/ss_adblock.sh scripts/uninstall_shadowsocks.sh ss/version ss/ssconfig.sh webs/Main_Ss_Content.asp; do
+for required in bin/anytls bin/ss-flock bin/ss-https-probe bin/ss-tcp-probe bin/koolbox bin/base64_encode bin/rss-local scripts/ss_socks5.sh scripts/ss_failover.sh scripts/ss_adblock.sh scripts/uninstall_shadowsocks.sh ss/version ss/ssconfig.sh webs/Main_Ss_Content.asp; do
   grep -Fqx "$required" "$WORK/paths" || fail 'A required full payload file is missing.'
 done
 [ "$(cat "$FILES/ss/version")" = 4.38.3 ] || fail 'The full payload is not the supported baseline.'
 (cd "$FILES" && md5sum -c "$PACKAGE/manifest-full.md5") > "$WORK/checksums.log" 2>&1 || fail 'Full payload checksum verification failed.'
 while IFS= read -r relative; do
-  case "$relative" in scripts/*.sh|ss/ssconfig.sh|ss/cru/*.sh|ss/rules/dnsmasq.postconf) sh -n "$FILES/$relative" || fail 'A full payload shell script has invalid syntax.' ;; esac
+  case "$relative" in bin/ss_latency.sh|scripts/*.sh|ss/ssconfig.sh|ss/cru/*.sh|ss/rules/dnsmasq.postconf) sh -n "$FILES/$relative" || fail 'A full payload shell script has invalid syntax.' ;; esac
 done < "$WORK/paths"
 "$FILES/bin/anytls" -version > "$WORK/client-version" 2>&1 || fail 'The enhanced client cannot run on this router.'
 grep -q -- '-r7000\.' "$WORK/client-version" || fail 'The full payload client is not the enhanced build.'

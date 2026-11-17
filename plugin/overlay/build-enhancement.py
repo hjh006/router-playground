@@ -12,13 +12,17 @@ ROOT = Path(__file__).resolve().parent
 WORK = ROOT.parent
 FILES = [
     'bin/anytls', 'bin/ss-flock', 'bin/ss-https-probe',
+    'bin/ss-tcp-probe',
+    'bin/ss_latency.sh',
     'scripts/ss_anytls.sh', 'scripts/ss_health.sh', 'scripts/ss_failover.sh',
     'scripts/ss_routing.sh', 'scripts/ss_dns_hooks.sh', 'scripts/ss_adblock.sh',
+    'scripts/ss_latency.sh',
     'scripts/ss_webtest.sh', 'scripts/uninstall_shadowsocks.sh',
     'ss/ssconfig.sh', 'ss/cru/foreign.sh',
     'ss/rules/dnsmasq.postconf', 'ss/rules/cacert.pem',
     'ss/rules/cacert.pem.sha256', 'webs/Main_Ss_Content.asp',
     'res/ss-health.js', 'res/ss-health.css', 'res/icon-shadowsocks.png',
+    'res/ss-latency-capabilities.js',
 ]
 
 def archive_metadata(item):
@@ -41,6 +45,7 @@ def build(private=False):
         'bin/anytls': WORK/'r7000-client/dist/anytls-client-linux-armv5-r7000.3',
         'bin/ss-flock': WORK/'r7000-client/dist/ss-flock-linux-armv5',
         'bin/ss-https-probe': WORK/'r7000-client/dist/ss-https-probe-linux-armv5',
+        'bin/ss-tcp-probe': WORK/'r7000-client/dist/ss-tcp-probe-linux-armv5',
         'scripts/uninstall_shadowsocks.sh': ROOT/'shadowsocks/uninstall.sh',
     }
     checksums = []

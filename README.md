@@ -6,6 +6,8 @@ Netgear R7000 / Merlin 380 的 AnyTLS 增强：设备自身 TUN 旁路、UU 游�
 
 当前源码版本：**4.38.3-r7000.5**，包含自动故障切换、UU 动态规则兼容、HTTPS 节点解析和可选域名广告过滤。**GitHub Releases 安装包仍为 4.38.3-r7000.3，完整包为 4.38.3-r7000.3-full.1**，不包含 r4/r5 新增功能；使用这些功能需按第 2 节从当前源码构建。
 
+**Android 1.4.0 与路由端入口 TCP 测速组件：**[版本、源码和校验文件](https://github.com/hjh006/router-playground/releases/tag/android-v1.4.0) · [路由端独立更新包 latency.tar.gz](https://github.com/hjh006/router-playground/releases/download/android-v1.4.0/latency.tar.gz)。该更新包仅用于已安装兼容增强 r5 的 R7000，不能用于首次安装；在软件中心“离线安装”上传 `latency.tar.gz`，只增加四个测速运行文件，不重装插件或改网络配置。它不包含上游完整插件或 AnyTLS 内核。
+
 **首次安装可直接下载完整离线包，一次上传，无需先装原版 4.38.3，也无需编译：**
 
 - [完整离线包 shadowsocks.tar.gz](https://github.com/hjh006/router-playground/releases/download/v4.38.3-r7000.3-full.1/shadowsocks.tar.gz)
@@ -22,9 +24,11 @@ Netgear R7000 / Merlin 380 的 AnyTLS 增强：设备自身 TUN 旁路、UU 游�
 
 <img src="android/res/drawable-nodpi/ic_launcher_imagegen.png" width="72" alt="自用路由线路 App 图标">
 
-[下载 Android 1.1.0 APK](https://github.com/hjh006/router-playground/releases/download/android-v1.1.0/router-control-1.1.0.apk) · [版本与校验文件](https://github.com/hjh006/router-playground/releases/tag/android-v1.1.0) · [源码与构建说明](android/README.md)
+[下载 Android 1.4.0 APK](https://github.com/hjh006/router-playground/releases/download/android-v1.4.0/router-control-1.4.0.apk) · [两端源码与校验文件](https://github.com/hjh006/router-playground/releases/tag/android-v1.4.0) · [构建与使用说明](android/README.md)
 
-用手机连接已经配置好的 R7000 增强 r3，读取并切换已有 AnyTLS 线路。支持国家/地区和国旗分组、双列线路卡片，以及手动测量手机 TCP 入口延迟；当前线路的路由器 HTTPS 检测单独显示。App 使用 Android 原生界面，需要 Android 8.0 或更新版本。
+用手机连接已经配置好的 R7000，读取并切换已有 AnyTLS 线路。支持国家/地区和国旗分组、双列线路卡片，以及由路由器逐条测量的节点入口 TCP 延迟；当前线路的 HTTPS 健康检测单独显示。App 使用 Android 原生界面，需要 Android 8.0 或更新版本。
+
+`android/` 当前版本为 1.4.0，支持 r5 的直连/代理、设备分流、自动故障切换、广告过滤和连接设置，并内置原插件完整面板。入口 TCP 延迟取 3 次成功建连的中位数，单次最多 5 秒、每条任务预算 25 秒；它只说明入口建连耗时，不能代替线路或出口可用性。无法确认路径未被透明代理截获时显示“路径待确认”，不显示毫秒数。该功能需要同版本入口 TCP 仅测速组件及 `router_tcp / entry / ram_mailbox_v1` 协议；适用范围及手机实测说明见 [Android 文档](android/README.md)。
 
 管理地址、账号和线路来自使用者自己的路由器；公开源码和 APK 不附带账号、节点、MAC、服务商 Hosts 或签名私钥。App 不创建手机 VPN，也不替代路由器插件安装包。切换保留现有 UU、旁路、DNS 和自动更新设置；检测数据代表短期采样，活动游戏流量需在自己的环境验收。
 
@@ -143,7 +147,16 @@ GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 go build \
 cd ..
 ```
 
-这两个私有工具提供锁、临时文件、权限检查和经过证书验证的 HTTPS 探测，安装时不覆盖系统工具。
+再编译独立的入口 TCP 探测器：
+
+```sh
+cd runtime-tools
+GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 go build \
+  -trimpath -ldflags='-s -w' -o ../build-tools/ss-tcp-probe-linux-armv5 ./cmd/ss-tcp-probe
+cd ..
+```
+
+这三个专用工具提供锁、临时文件、权限检查、经过证书验证的 HTTPS 探测及入口 TCP 建连测量，安装时不覆盖系统工具。TCP 工具先只读核验路由器 OUTPUT 路径，再对已解析的入口地址测三次建连；无法确认未被代理截获时返回 `path_unverified`，不提供毫秒值，也不修改规则。
 
 ### 2.5 生成增强包
 
@@ -153,11 +166,14 @@ python3 scripts/prepare.py \
   --anytls-binary build-client/anytls-client-linux-armv5-r7000.3 \
   --flock-binary build-tools/ss-flock-linux-armv5 \
   --https-probe-binary build-tools/ss-https-probe-linux-armv5 \
+  --tcp-probe-binary build-tools/ss-tcp-probe-linux-armv5 \
   --ca-bundle downloads/cacert.pem
 python3 build/r7000-enhanced/build-enhancement.py
 ```
 
 最终生成：**`build/r7000-update-generic/shadowsocks.tar.gz`**。
+
+当前增量清单包含 24 个固定文件；独立测速组件清单只包含 TCP 工具、启动脚本、测量脚本和能力声明四个文件。两者的构建器和安装器会核对各自清单。
 
 | 文件 | 用途 |
 | --- | --- |
@@ -448,7 +464,7 @@ Google / YouTube 使用轻量连通性地址，Telegram 使用 HTTPS 请求（�
 | `plugin/overlay/` | 新增脚本、安装器、界面资源、图标和测试 |
 | `patches/` | Fancyss 4.38.3 与 AnyTLS 客户端改动 |
 | `client/overlay/` | 新增连接复用测试 |
-| `runtime-tools/` | 仅 Go 标准库依赖的 ss-flock、HTTPS 探测器与测试 |
+| `runtime-tools/` | 仅 Go 标准库依赖的 ss-flock、HTTPS 探测器、入口 TCP 探测器与测试 |
 | `scripts/prepare.py` | 校验本地输入，恢复可构建的上游工作树 |
 | `provenance.json` | 固定上游版本、SHA256、工具链和来源 |
 

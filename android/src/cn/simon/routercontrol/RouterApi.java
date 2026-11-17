@@ -23,10 +23,10 @@ import java.util.Map;
 /** The installed AM380 fancyss interface. Never logs or persists configuration. */
 public final class RouterApi {
     private static final int CONFIG_LIMIT = 2 * 1024 * 1024;
-    private static final String[] R3_CAPABILITIES = {"ss_basic_bypass_macs", "ss_basic_uu_macs",
-            "ss_basic_anytls_min_idle", "ss_basic_anytls_idle_check", "ss_basic_anytls_idle_timeout",
+    // Empty MAC/Hosts settings may be omitted by the firmware's dbconf exporter.
+    private static final String[] R3_CAPABILITIES = {"ss_basic_anytls_min_idle", "ss_basic_anytls_idle_check", "ss_basic_anytls_idle_timeout",
             "ss_basic_anytls_handshake", "ss_basic_anytls_alpn", "ss_basic_anytls_fingerprint",
-            "ss_basic_anytls_hosts", "ss_basic_health_interval", "ss_basic_health_timeout",
+            "ss_basic_health_interval", "ss_basic_health_timeout",
             "ss_basic_health_failures"};
     private final String baseUrl;
     private final String cookie;
@@ -110,14 +110,18 @@ public final class RouterApi {
         public final String version;
         /** Null when the optional health endpoint is unavailable or invalid. */
         public final JSONObject health;
+        public final JSONObject failover;
+        public final JSONObject adblock;
 
-        private Snapshot(Map<String, String> values, JSONObject health) throws IOException {
+        private Snapshot(Map<String, String> values, JSONObject health, JSONObject failover, JSONObject adblock) throws IOException {
             validateConfig(values);
             this.config = Collections.unmodifiableMap(new LinkedHashMap<>(values));
             this.currentId = values.getOrDefault("ssconf_basic_node", "");
             this.enabled = "1".equals(values.get("ss_basic_enable"));
             this.version = values.getOrDefault("ss_basic_version_local", "未知版本");
             this.health = health;
+            this.failover = failover;
+            this.adblock = adblock;
             List<Node> found = new ArrayList<>();
             for (String key : values.keySet()) {
                 if (key.matches("ssconf_basic_name_[1-9][0-9]{0,8}")) {
@@ -150,7 +154,155 @@ public final class RouterApi {
         } catch (IOException | JSONException ignored) {
             // Health is optional; a successful configuration read still establishes the connection.
         }
-        return new Snapshot(config, health);
+        JSONObject failover = config.containsKey("ss_basic_failover_enable")
+                ? optionalStatus("/res/ss-failover-status.js", "checked_at", "state") : null;
+        JSONObject adblock = config.containsKey("ss_basic_adblock_enable")
+                ? optionalStatus("/res/ss-adblock-status.js", "enabled", "state") : null;
+        return new Snapshot(config, health, failover, adblock);
+    }
+
+    private JSONObject optionalStatus(String path, String first, String second) {
+        try {
+            JSONObject value = new JSONObject(request(path, null, 64 * 1024));
+            return value.optInt("version", 0) == 1 && value.has(first) && value.has(second) ? value : null;
+        } catch (IOException | JSONException ignored) { return null; }
+    }
+
+    /** Router-to-entry TCP median; never authenticates a node or switches the active route. */
+    public static final class LatencyJob {
+        public final String jobId, nodeId, state, reason;
+        public final long latencyMs, checkedAtMillis;
+
+        private LatencyJob(String jobId, String nodeId, String state, long latencyMs, long checkedAtMillis, String reason) {
+            this.jobId = jobId; this.nodeId = nodeId; this.state = state;
+            this.latencyMs = latencyMs; this.checkedAtMillis = checkedAtMillis; this.reason = reason;
+        }
+
+        public boolean isTerminal() { return !"idle".equals(state) && !"running".equals(state); }
+    }
+
+    public boolean supportsRouterLatency() throws IOException {
+        try {
+            JSONObject value = new JSONObject(request("/res/ss-latency-capabilities.js", null, 8192));
+            return value.optInt("version", 0) == 1 && "router_tcp".equals(value.optString("method"))
+                    && "entry".equals(value.optString("target")) && value.optInt("max_parallel", 0) == 1
+                    && "ram_mailbox_v1".equals(value.optString("transport"));
+        } catch (JSONException ignored) { return false; }
+    }
+
+    public void startLatency(String nodeId, String jobId) throws IOException {
+        validateLatencyId(nodeId); validateLatencyJobId(jobId);
+        Map<String, String> values = loadConfig();
+        validateConfig(values);
+        if (!isAnyTls(values, nodeId) || !values.containsKey("ssconf_basic_name_" + nodeId)) {
+            throw new IOException("该 AnyTLS 线路已不存在，请刷新线路列表");
+        }
+        latencyCommand("start " + nodeId + " " + jobId);
+    }
+
+    public void cancelLatency(String jobId) throws IOException {
+        validateLatencyJobId(jobId);
+        latencyCommand("cancel " + jobId);
+    }
+
+    private static void validateLatencyId(String value) throws IOException {
+        if (value == null || !value.matches("[1-9][0-9]{0,5}")) throw new IOException("测速线路编号无效");
+    }
+
+    private static void validateLatencyJobId(String value) throws IOException {
+        if (value == null || !value.matches("[0-9a-f]{32}")) throw new IOException("测速任务编号无效");
+    }
+
+    private void latencyCommand(String arguments) throws IOException {
+        // This firmware dispatches only a bare script name through the software center.
+        // Pass validated identifiers in RAM instead of shell arguments or DBus settings.
+        String boundary = "----RouterLatency" + java.util.UUID.randomUUID().toString().replace("-", "");
+        String payload = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"request\"\r\n"
+                + "Content-Type: text/plain\r\n\r\n" + arguments + "\n\r\n--" + boundary + "--\r\n";
+        String uploaded = request("/ssupload.cgi?a=/tmp/ss_latency/request", payload.getBytes(StandardCharsets.UTF_8),
+                16 * 1024, "multipart/form-data; boundary=" + boundary);
+        if (!java.util.regex.Pattern.compile("upload_ok\\(\\s*1\\s*\\)").matcher(uploaded).find()) {
+            throw new IOException("未确认测速请求已上传，未启动路由器任务，请检查登录和测速组件");
+        }
+        Map<String, String> form = new LinkedHashMap<>();
+        form.put("SystemCmd", "ss_latency.sh");
+        form.put("action_mode", " Refresh ");
+        form.put("current_page", "Main_Ss_Content.asp");
+        submit(form);
+    }
+
+    public LatencyJob readLatency() throws IOException {
+        return parseLatency(request("/res/ss-latency-status.js", null, 16 * 1024));
+    }
+
+    static LatencyJob parseLatency(String body) throws IOException {
+        try {
+            JSONObject value = new JSONObject(body);
+            String state = value.getString("state"), job = value.getString("job_id");
+            String node = value.get("node_id").toString(), reason = value.optString("reason", "");
+            if (value.getInt("version") != 1 || !"router_tcp".equals(value.getString("method"))
+                    || !"entry".equals(value.getString("target")) || !"ram_mailbox_v1".equals(value.getString("transport"))
+                    || !java.util.Arrays.asList("idle", "running", "ok", "timeout", "failed", "dns_failed", "busy", "cancelled", "changed", "path_unverified").contains(state)
+                    || !reason.matches("[a-z_]{0,48}")) throw new IOException("路由器测速状态格式无效");
+            if ("idle".equals(state)) {
+                if (!job.isEmpty() || !"0".equals(node)) throw new IOException("路由器测速状态格式无效");
+            } else { validateLatencyJobId(job); validateLatencyId(node); }
+            long checked = latencyInteger(value, "checked_at", 4102444800L);
+            long ms = -1;
+            if ("ok".equals(state)) {
+                ms = latencyInteger(value, "latency_ms", 5000);
+                if (checked == 0) throw new IOException("路由器测速结果缺少采样时间");
+            } else if (!value.has("latency_ms") || !value.isNull("latency_ms")) {
+                throw new IOException("路由器测速状态不能携带成功延迟");
+            }
+            return new LatencyJob(job, node, state, ms, checked * 1000, reason);
+        } catch (JSONException | IllegalArgumentException ignored) {
+            throw new IOException("未读取到有效的路由器测速状态，请确认登录及测速组件");
+        }
+    }
+
+    private static long latencyInteger(JSONObject value, String key, long maximum) throws IOException, JSONException {
+        Object raw = value.get(key);
+        if (!(raw instanceof Number) || !raw.toString().matches("0|[1-9][0-9]{0,12}")) throw new IOException("路由器测速数值无效");
+        long number = ((Number) raw).longValue();
+        if (number > maximum) throw new IOException("路由器测速数值超出范围");
+        return number;
+    }
+
+    /** Local cache identity only. This hash and private node values never leave the phone. */
+    public static String latencyFingerprint(Node node, Map<String, String> config) {
+        if (node == null || config == null) return "";
+        java.util.TreeMap<String, String> values = new java.util.TreeMap<>();
+        values.put("metric", "router_tcp/entry/median3/v1");
+        for (String field : new String[]{"server", "port"}) {
+            String key = "ssconf_basic_" + field + "_" + node.id;
+            values.put(key, config.getOrDefault(key, ""));
+        }
+        for (Map.Entry<String, String> entry : config.entrySet()) {
+            if ("ss_basic_anytls_hosts".equals(entry.getKey()) || entry.getKey().startsWith("ss_basic_server_resolver")) {
+                values.put(entry.getKey(), entry.getValue());
+            }
+        }
+        try {
+            java.security.MessageDigest hash = java.security.MessageDigest.getInstance("SHA-256");
+            for (Map.Entry<String, String> entry : values.entrySet()) {
+                hash.update(entry.getKey().getBytes(StandardCharsets.UTF_8)); hash.update((byte) 0);
+                hash.update(entry.getValue().getBytes(StandardCharsets.UTF_8)); hash.update((byte) 0);
+            }
+            StringBuilder encoded = new StringBuilder();
+            for (byte b : hash.digest()) encoded.append(String.format(java.util.Locale.ROOT, "%02x", b & 255));
+            return encoded.toString();
+        } catch (java.security.NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
+    }
+
+    /** User-initiated export of the original plugin's fixed text backup; never persisted here. */
+    public byte[] exportBackup() throws IOException {
+        validateConfig(loadConfig());
+        String body = request("/ss_conf_backup.txt", null, CONFIG_LIMIT);
+        if (!body.matches("(?s)\ufeff?\\s*ss[A-Za-z0-9_]*=.*")) {
+            throw new IOException("未读取到插件配置备份，请核对登录状态后重试");
+        }
+        return body.getBytes(StandardCharsets.UTF_8);
     }
 
     private Map<String, String> loadConfig() throws IOException {
@@ -173,6 +325,58 @@ public final class RouterApi {
     private static boolean isAnyTls(Map<String, String> config, String id) {
         return "4".equals(config.get("ssconf_basic_type_" + id))
                 && "AnyTLS".equals(config.get("ssconf_basic_trojan_binary_" + id));
+    }
+
+    /** Apply a single settings group once; expected contains the screen's original raw DBus values. */
+    public void applySettings(String group, Map<String, String> changes, Map<String, String> expected) throws IOException {
+        if (changes == null || expected == null) throw new IOException("设置数据不完整，请重新读取");
+        Map<String, String> current = loadConfig();
+        validateConfig(current);
+        if (!hasR3Capabilities(current) || !PluginSettings.supported(group, current)) {
+            throw new IOException("当前插件不支持这组设置，请核对版本并刷新");
+        }
+        // A setting screen may stay open while the browser or failover controller changes state.
+        // Refuse stale edits; unrelated settings are never copied back from that screen.
+        for (PluginSettings.Field field : PluginSettings.fields(group, expected)) {
+            if (!expected.getOrDefault(field.key, "").equals(current.getOrDefault(field.key, ""))) {
+                throw new IOException("这组设置已在其他位置修改，请刷新后重新编辑");
+            }
+        }
+        for (String key : new String[]{"ss_basic_enable", "ss_basic_type", "ss_basic_trojan_binary", "ssconf_basic_node"}) {
+            if (!java.util.Objects.equals(expected.get(key), current.get(key))) {
+                throw new IOException("路由器运行配置已变化，请刷新后重新编辑");
+            }
+        }
+        if ("acl".equals(group)) {
+            Map<String, String> oldRules = new LinkedHashMap<>(), liveRules = new LinkedHashMap<>();
+            for (Map.Entry<String, String> entry : expected.entrySet()) {
+                if (entry.getKey().matches("ss_acl_(ip|name|port|mode)_[1-9][0-9]{0,5}")) oldRules.put(entry.getKey(), entry.getValue());
+            }
+            for (Map.Entry<String, String> entry : current.entrySet()) {
+                if (entry.getKey().matches("ss_acl_(ip|name|port|mode)_[1-9][0-9]{0,5}")) liveRules.put(entry.getKey(), entry.getValue());
+            }
+            if (!oldRules.equals(liveRules) || !java.util.Objects.equals(expected.get("ss_basic_mode"), current.get("ss_basic_mode"))) {
+                throw new IOException("访问控制的设备或全局模式已变化，请刷新后重新编辑");
+            }
+        }
+        Map<String, String> normalized = PluginSettings.normalize(group, changes, current);
+        Map<String, String> form = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : normalized.entrySet()) {
+            if (!entry.getValue().equals(current.getOrDefault(entry.getKey(), ""))) form.put(entry.getKey(), entry.getValue());
+        }
+        if (form.isEmpty()) return;
+        if ("adblock".equals(group)) {
+            // This is the plugin's exact hot-save contract, not a global proxy reload.
+            Map<String, String> merged = new LinkedHashMap<>(current);
+            merged.putAll(normalized);
+            for (PluginSettings.Field field : PluginSettings.fields(group, current)) {
+                form.put(field.key, merged.getOrDefault(field.key, ""));
+            }
+        }
+        form.put("SystemCmd", "adblock".equals(group) ? "ss_adblock.sh" : "ss_config.sh");
+        form.put("action_mode", " Refresh ");
+        form.put("current_page", "Main_Ss_Content.asp");
+        submit(form);
     }
 
     /** Submits once. A lost response must be resolved by reading state, never by blind retry. */
@@ -219,11 +423,16 @@ public final class RouterApi {
         form.put("SystemCmd", "ss_config.sh");
         form.put("action_mode", " Refresh ");
         form.put("current_page", "Main_Ss_Content.asp");
+        submit(form);
+    }
+
+    private void submit(Map<String, String> form) throws IOException {
         StringBuilder encoded = new StringBuilder();
         for (Map.Entry<String, String> entry : form.entrySet()) {
             if (encoded.length() > 0) encoded.append('&');
             encoded.append(URLEncoder.encode(entry.getKey(), "UTF-8"));
-            encoded.append('=').append(URLEncoder.encode(entry.getValue(), "UTF-8"));
+            // Keep the legacy CGI's action parameter in its percent-encoded form.
+            encoded.append('=').append(URLEncoder.encode(entry.getValue(), "UTF-8").replace("+", "%20"));
         }
         String response = request("/applydb.cgi?p=ss", encoded.toString().getBytes(StandardCharsets.UTF_8), 256 * 1024);
         String lower = response.toLowerCase(java.util.Locale.ROOT);
@@ -234,6 +443,10 @@ public final class RouterApi {
     }
 
     private String request(String path, byte[] form, int limit) throws IOException {
+        return request(path, form, limit, "application/x-www-form-urlencoded");
+    }
+
+    private String request(String path, byte[] form, int limit, String contentType) throws IOException {
         // Every URL is constructed from a fixed relative endpoint, never from returned router data.
         URL target = new URL(baseUrl + path);
         HttpURLConnection connection = (HttpURLConnection) target.openConnection();
@@ -241,8 +454,10 @@ public final class RouterApi {
         connection.setConnectTimeout(10000);
         connection.setReadTimeout(20000);
         connection.setUseCaches(false);
+        connection.setRequestProperty("User-Agent", "Mozilla/5.0");
         connection.setRequestProperty("Cache-Control", "no-store");
         connection.setRequestProperty("Accept", "text/plain, application/json, */*");
+        connection.setRequestProperty("X-Requested-With", "XMLHttpRequest");
         connection.setRequestProperty("Referer", baseUrl + "/Main_Ss_Content.asp");
         connection.setRequestProperty("Origin", baseUrl);
         if (!cookie.isEmpty()) connection.setRequestProperty("Cookie", cookie);
@@ -251,7 +466,7 @@ public final class RouterApi {
             if (form != null) {
                 connection.setRequestMethod("POST");
                 connection.setDoOutput(true);
-                connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+                connection.setRequestProperty("Content-Type", contentType);
                 connection.setFixedLengthStreamingMode(form.length);
                 try (OutputStream out = connection.getOutputStream()) { out.write(form); }
             }
