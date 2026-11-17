@@ -57,23 +57,26 @@ index 1348a40..b7c0ac5 100755
 +# The firmware invokes this hook while serving /ss_status. Never block httpd.
 +/koolshare/scripts/ss_health.sh refresh >/dev/null 2>&1 &
 diff --git a/shadowsocks/ss/rules/dnsmasq.postconf b/shadowsocks/ss/rules/dnsmasq.postconf
-index ee71edb..673dea1 100755
+index ee71edb..b38a639 100755
 --- a/shadowsocks/ss/rules/dnsmasq.postconf
 +++ b/shadowsocks/ss/rules/dnsmasq.postconf
-@@ -11,6 +11,12 @@ ss_dns_china=`dbus get ss_dns_china`
+@@ -11,6 +11,15 @@ ss_dns_china=`dbus get ss_dns_china`
  ss_dns_china_user=`dbus get ss_dns_china_user`
  gfw_on=`dbus list ss_acl_mode_|cut -d "=" -f 2 | grep 1`
  chn_on=`dbus list ss_acl_mode_|cut -d "=" -f 2 | grep -E "2|3|4"`
 +if [ -r /koolshare/scripts/ss_routing.sh ]; then
 +	. /koolshare/scripts/ss_routing.sh
 +	if ss_routing_load_bypass_macs && [ -n "$SS_ROUTING_UU_MACS" ]; then
-+		chn_on=1
++		case "$SS_ROUTING_UU_TCP_POLICY" in
++			gfwlist) gfw_on=1 ;;
++			foreign) chn_on=1 ;;
++		esac
 +	fi
 +fi
  all_on=`dbus list ss_acl_mode_|cut -d "=" -f 2 | grep -E "5"`
  ISP_DNS1=$(nvram get wan0_dns|sed 's/ /\n/g'|grep -v 0.0.0.0|grep -v 127.0.0.1|sed -n 1p)
  ISP_DNS2=$(nvram get wan0_dns|sed 's/ /\n/g'|grep -v 0.0.0.0|grep -v 127.0.0.1|sed -n 2p)
-@@ -71,9 +77,13 @@ perpare(){
+@@ -71,9 +80,13 @@ perpare(){
  	[ "$ss_dns_china" == "12" ] && {
  		[ -n "$ss_dns_china_user" ] && CDN="$ss_dns_china_user" || CDN="114.114.114.114"
  	}
@@ -90,7 +93,7 @@ index ee71edb..673dea1 100755
  }
  
  use_chn_plan(){
-@@ -88,7 +98,7 @@ use_chn_plan(){
+@@ -88,7 +101,7 @@ use_chn_plan(){
  		# 选择其它国内DNS时候
  		pc_insert "no-poll" "server=$CDN#53" "/etc/dnsmasq.conf"
  	fi
@@ -99,7 +102,7 @@ index ee71edb..673dea1 100755
  }
  
  use_for_plan(){
-@@ -103,11 +113,11 @@ use_for_plan(){
+@@ -103,11 +116,11 @@ use_for_plan(){
  
  		pc_replace "cache-size=1500" "cache-size=9999" $CONFIG
  		pc_insert "no-poll" "server=$ss_direct_user" "/etc/dnsmasq.conf"
@@ -114,35 +117,156 @@ index ee71edb..673dea1 100755
  }
  
 diff --git a/shadowsocks/ss/ssconfig.sh b/shadowsocks/ss/ssconfig.sh
-index 758ed7a..00b4044 100755
+index 758ed7a..f587ab0 100755
 --- a/shadowsocks/ss/ssconfig.sh
 +++ b/shadowsocks/ss/ssconfig.sh
-@@ -3,6 +3,16 @@
+@@ -3,7 +3,134 @@
  # shadowsocks script for AM380 merlin firmware
  # by sadog (sadoneli@gmail.com) from koolshare.cn
  
+-eval `dbus export ss`
++# Acquire the service lock before reading DBus. A waiting restart must never
++# apply the configuration snapshot from before a manual switch or stop.
++LOCK_FILE=/var/lock/koolss.lock
++SS_SERVICE_LOCKED=0
++set_lock(){
++	[ "$SS_SERVICE_LOCKED" = 1 ] && return 0
++	exec 7>"$LOCK_FILE"
++	/koolshare/bin/ss-flock -x 7 || exit 1
++	SS_SERVICE_LOCKED=1
++}
++unset_lock(){
++	[ "$SS_SERVICE_LOCKED" = 1 ] || return 0
++	/koolshare/bin/ss-flock -u 7
++	exec 7>&-
++	SS_SERVICE_LOCKED=0
++}
++set_lock
++trap 'unset_lock' EXIT
++trap 'exit 129' HUP
++trap 'exit 130' INT
++trap 'exit 143' TERM
++SS_FAILOVER_ACTION=${1:-}
++SS_FAILOVER_STATE=/tmp/ss_failover
++ss_failover_guard(){
++	case "$SS_FAILOVER_EXPECTED" in ''|*[!0-9]*) return 75 ;; esac
++	[ "${#SS_FAILOVER_EXPECTED}" -le 6 ] || return 75
++	case "$SS_FAILOVER_GENERATION" in ''|*[!A-Za-z0-9._-]*) return 75 ;; esac
++	[ "${#SS_FAILOVER_GENERATION}" -le 64 ] || return 75
++	[ ! -L "$SS_FAILOVER_STATE" ] && [ ! -L "$SS_FAILOVER_STATE/generation" ] || return 75
++	[ "$(dbus get ss_basic_enable)" = 1 ] && [ "$(dbus get ss_basic_failover_enable)" = 1 ] &&
++	[ "$(dbus get ss_basic_type)" = 4 ] && [ "$(dbus get ss_basic_trojan_binary)" = AnyTLS ] &&
++	[ "$(dbus get ssconf_basic_node)" = "$SS_FAILOVER_EXPECTED" ] &&
++	[ "$(cat "$SS_FAILOVER_STATE/generation" 2>/dev/null)" = "$SS_FAILOVER_GENERATION" ]
++}
++ss_failover_set_mode(){
++	local temporary rc=0
++	[ ! -L "$SS_FAILOVER_STATE" ] || return 1
++	mkdir -p "$SS_FAILOVER_STATE" && chmod 700 "$SS_FAILOVER_STATE" || return 1
++	[ ! -L "$SS_FAILOVER_STATE/commit.lock" ] || return 1
++	exec 6>"$SS_FAILOVER_STATE/commit.lock"
++	/koolshare/bin/ss-flock -x 6 || { exec 6>&-; return 1; }
++	temporary=$(/koolshare/bin/ss-flock mktemp "$SS_FAILOVER_STATE/mode.XXXXXX") || rc=1
++	if [ "$rc" = 0 ]; then
++		printf '%s\n' "$1" > "$temporary" && chmod 600 "$temporary" && mv -f "$temporary" "$SS_FAILOVER_STATE/mode" || rc=1
++	fi
++	/koolshare/bin/ss-flock -u 6
++	exec 6>&-
++	return "$rc"
++}
++ss_failover_select(){
++	local id=$1 field value snapshot rc=0
++	case "$id" in ''|*[!0-9]*) return 1 ;; esac
++	[ "${#id}" -le 6 ] && [ "$id" -ge 1 ] && [ "$id" -le 999999 ] || return 1
++	[ "$(dbus get ssconf_basic_type_$id)" = 4 ] && [ "$(dbus get ssconf_basic_trojan_binary_$id)" = AnyTLS ] || return 1
++	value=$(dbus get ssconf_basic_port_$id)
++	case "$value" in ''|*[!0-9]*) return 1 ;; esac
++	[ "${#value}" -le 5 ] && [ "$value" -ge 1 ] && [ "$value" -le 65535 ] || return 1
++	[ -n "$(dbus get ssconf_basic_server_$id)" ] && [ -n "$(dbus get ssconf_basic_password_$id)" ] || return 1
++	ss_failover_guard || return 75
++	# Temporary snapshots are private and removed on success or rollback. Never
++	# eval node values, and publish the selected ID only after every field lands.
++	snapshot=$(/koolshare/bin/ss-flock mktemp "$SS_FAILOVER_STATE/selection.XXXXXX") || return 1
++	rm -f "$snapshot" && mkdir -m 700 "$snapshot" || return 1
++	for field in server port password trojan_sni allowinsecure use_kcp type trojan_binary; do
++		dbus get "ss_basic_$field" > "$snapshot/$field" || { rm -rf "$snapshot"; return 1; }
++	done
++	for field in server port password trojan_sni allowinsecure use_kcp type trojan_binary; do
++		ss_failover_guard || { rm -rf "$snapshot"; return 75; }
++		value=$(dbus get "ssconf_basic_${field}_$id")
++		case "$field" in allowinsecure|use_kcp) [ "$value" = 1 ] || value=0 ;; esac
++		dbus set "ss_basic_$field=$value" || { rc=1; break; }
++	done
++	ss_failover_guard || { rm -rf "$snapshot"; return 75; }
++	if [ "$rc" = 0 ]; then dbus set "ssconf_basic_node=$id" || rc=1; fi
++	if [ "$rc" != 0 ]; then
++		for field in server port password trojan_sni allowinsecure use_kcp type trojan_binary; do
++			dbus set "ss_basic_$field=$(cat "$snapshot/$field")" || :
++		done
++	fi
++	rm -rf "$snapshot"
++	[ "$rc" = 0 ] && SS_FAILOVER_EXPECTED=$id
++	return "$rc"
++}
++case "$SS_FAILOVER_ACTION" in
++failover-switch)
++	[ "$#" = 4 ] || exit 75
++	SS_FAILOVER_TARGET=$2 SS_FAILOVER_EXPECTED=$3 SS_FAILOVER_GENERATION=$4
++	ss_failover_guard || exit 75
++	;;
++failover-direct)
++	[ "$#" = 3 ] || exit 75
++	SS_FAILOVER_EXPECTED=$2 SS_FAILOVER_GENERATION=$3
++	ss_failover_guard || exit 75
++	;;
++esac
++
 +. /koolshare/scripts/ss_routing.sh
-+if ! ss_routing_load_bypass_macs; then
++if [ "$SS_FAILOVER_ACTION" != stop ] && ! ss_routing_load_bypass_macs; then
 +	printf '%s\n' 'Invalid or overlapping device MAC profiles; no routing changes were applied.' >&2
 +	exit 1
 +fi
-+if ! sh /koolshare/scripts/ss_anytls.sh validate-hosts; then
++if [ "$SS_FAILOVER_ACTION" != stop ] && ! sh /koolshare/scripts/ss_anytls.sh validate-hosts; then
 +	printf '%s\n' 'Invalid AnyTLS Hosts mappings; no routing changes were applied.' >&2
 +	exit 1
 +fi
 +. /koolshare/scripts/ss_dns_hooks.sh
- eval `dbus export ss`
++case "$SS_FAILOVER_ACTION" in stop|failover-direct) ;;
++*)
++	if [ "$(dbus get ss_basic_type)" = 4 ] && [ "$(dbus get ss_basic_trojan_binary)" = AnyTLS ] && [ "$(dbus get ss_basic_server_resolver)" = 12 ]; then
++		ss_dns_normalize_resolver "$(dbus get ss_basic_server_resolver_user)" >/dev/null || { printf '%s\n' 'Invalid node DNS endpoint; no service changes were applied.' >&2; exit 1; }
++	fi ;;
++esac
++if [ "${1:-}" != stop ]; then
++	sh /koolshare/scripts/ss_failover.sh validate || { printf '%s\n' 'Invalid failover settings; no service changes were applied.' >&2; exit 1; }
++fi
++case "$SS_FAILOVER_ACTION" in stop|failover-direct) ;;
++*) sh /koolshare/scripts/ss_adblock.sh validate || { printf '%s\n' 'Invalid ad-filter settings; no service changes were applied.' >&2; exit 1; } ;;
++esac
++if [ "$SS_FAILOVER_ACTION" = failover-switch ]; then
++	ss_failover_select "$SS_FAILOVER_TARGET" || exit $?
++fi
++if [ "$SS_FAILOVER_ACTION" = stop ]; then
++	# Cleanup needs no node credentials or unvalidated profile snapshot.
++	ss_basic_dnsmasq_fastlookup=$(dbus get ss_basic_dnsmasq_fastlookup)
++	case "$ss_basic_dnsmasq_fastlookup" in 0|1|2|3) ;; *) ss_basic_dnsmasq_fastlookup=0 ;; esac
++else
++	eval `dbus export ss`
++fi
  source /koolshare/scripts/base.sh
  source helper.sh
-@@ -26,6 +36,7 @@ IFIP_DNS1=`echo $ISP_DNS1|grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}|:"`
+ # Variable definitions
+@@ -26,6 +153,9 @@ IFIP_DNS1=`echo $ISP_DNS1|grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}|:"`
  IFIP_DNS2=`echo $ISP_DNS2|grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}|:"`
  gfw_on=`dbus list ss_acl_mode_|cut -d "=" -f 2 | grep -E "1"`
  chn_on=`dbus list ss_acl_mode_|cut -d "=" -f 2 | grep -E "2|3|4"`
-+[ -n "$SS_ROUTING_UU_MACS" ] && chn_on=1
++if [ -n "$SS_ROUTING_UU_MACS" ]; then
++	case "$SS_ROUTING_UU_TCP_POLICY" in gfwlist) gfw_on=1 ;; foreign) chn_on=1 ;; esac
++fi
  all_on=`dbus list ss_acl_mode_|cut -d "=" -f 2 | grep -E "5"`
  lan_ipaddr=$(nvram get lan_ipaddr)
  ip_prefix_hex=`nvram get lan_ipaddr | awk -F "." '{printf ("0x%02x", $1)} {printf ("%02x", $2)} {printf ("%02x", $3)} {printf ("00/0xffffff00\n")}'`
-@@ -60,6 +71,10 @@ fi
+@@ -60,6 +190,10 @@ fi
  	fi
  }
  
@@ -153,25 +277,31 @@ index 758ed7a..00b4044 100755
  get_lan_cidr(){
  	netmask=`nvram get lan_netmask`
  	local x=${netmask##*255.}
-@@ -110,13 +125,13 @@ get_server_resolver(){
+@@ -109,17 +243,13 @@ get_server_resolver(){
+ 	echo $RESOLVER
  }
  
- set_lock(){
+-set_lock(){
 -	exec 1000>"$LOCK_FILE"
 -	flock -x 1000
-+	exec 7>"$LOCK_FILE"
-+	/koolshare/bin/ss-flock -x 7 || exit 1
- }
- 
- unset_lock(){
+-}
+-
+-unset_lock(){
 -	flock -u 1000
 -	rm -rf "$LOCK_FILE"
-+	/koolshare/bin/ss-flock -u 7
-+	exec 7>&-
- }
- 
+-}
+-
  close_in_five(){
-@@ -144,18 +159,13 @@ close_in_five(){
++	if [ "$ss_basic_failover_enable" = 1 ] && ss_routing_is_anytls && [ "$(dbus get ss_basic_enable)" = 1 ]; then
++		echo_date "代理启动失败，保持故障切换监控并撤回代理路由和 DNS。"
++		ss_failover_enter_direct || ss_failover_set_mode error
++		ss_failover_watchdog
++		exit 20
++	fi
+ 	echo_date "插件将在5秒后自动关闭！！"
+ 	sleep 1
+ 	echo_date 5
+@@ -144,18 +274,13 @@ close_in_five(){
  # ================================= ss stop ===============================
  restore_conf(){
  	echo_date 删除ss相关的名单配置文件.
@@ -193,40 +323,40 @@ index 758ed7a..00b4044 100755
  	rm -rf /tmp/smartdns.conf
  }
  
-@@ -324,12 +334,29 @@ resolv_server_ip(){
+@@ -324,12 +449,27 @@ resolv_server_ip(){
  		#echo_date "你使用的v2ray json配置，请自行将v2ray服务器ip地址添加到IP/CIDR白名单！"
  		return 1
  	else
+-		IFIP=`echo $ss_basic_server|grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}|:"`
 +		# Resolve the provider's effective node host before starting the proxy.
 +		# Its address must not depend on DNS transported by that same proxy.
 +		if ss_routing_is_anytls; then
 +			ss_basic_server=$(sh /koolshare/scripts/ss_anytls.sh map-host "$ss_basic_server") || close_in_five
 +		fi
- 		IFIP=`echo $ss_basic_server|grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}|:"`
++		if ss_routing_is_anytls; then
++			IFIP=$(printf '%s\n' "$ss_basic_server" | awk -F. 'NF==4 {for(i=1;i<=4;i++)if($i!~/^[0-9]+$/ || length($i)>3 || (length($i)>1 && substr($i,1,1)=="0") || $i+0>255)exit;print}')
++		else
++			IFIP=`echo $ss_basic_server|grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}|:"`
++		fi
  		if [ -z "$IFIP" ];then
 -			# 服务器地址强制由114解析，以免插件还未开始工作而导致解析失败
 -			echo "server=/$ss_basic_server/$(get_server_resolver)#53" > /jffs/configs/dnsmasq.d/ss_server.conf
-+			# 节点地址使用独立解析器，避免启动时依赖尚未建立的代理。
-+			ss_dns_write_server_config "$ss_basic_server" "$(get_server_resolver)" || close_in_five
- 			echo_date 尝试解析节点服务器的ip地址，DNS：$(get_server_resolver)
+-			echo_date 尝试解析节点服务器的ip地址，DNS：$(get_server_resolver)
 -			server_ip=`nslookup "$ss_basic_server" $(get_server_resolver) | sed '1,4d' | awk '{print $3}' | grep -v :|awk 'NR==1{print}'`
++			# 节点地址使用独立解析器，避免启动时依赖尚未建立的代理。
++			ss_routing_is_anytls || ss_dns_write_server_config "$ss_basic_server" "$(get_server_resolver)" || close_in_five
++			echo_date 使用配置的节点解析器解析节点地址。
 +			if ss_routing_is_anytls; then
-+				server_ip=$(nslookup "$ss_basic_server" "$(get_server_resolver)" | awk '
-+					/^Name:/ {answer=1; next}
-+					answer && /Address/ {
-+						for(i=2;i<=NF;i++) if($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
-+							n=split($i,a,"."); valid=(n==4)
-+							for(j=1;j<=n;j++) if(length(a[j])>3 || a[j]+0>255) valid=0
-+							if(valid) {print $i; exit}
-+						}
-+					}')
++				resolver_endpoint=$(ss_dns_normalize_resolver "$(get_server_resolver)") || close_in_five
++				server_ip=$(/koolshare/bin/ss-https-probe -resolve "$ss_basic_server" -dns "$resolver_endpoint" -ca /koolshare/ss/rules/cacert.pem -timeout 5s 7>&-) || close_in_five
++				server_ip=$(printf '%s\n' "$server_ip" | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/{print;exit}')
 +			else
 +				server_ip=`nslookup "$ss_basic_server" $(get_server_resolver) | sed '1,4d' | awk '{print $3}' | grep -v :|awk 'NR==1{print}'`
 +			fi
  			if [ "$?" == "0" ];then
  				server_ip=`echo $server_ip|grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}|:"`
  			else
-@@ -341,6 +368,10 @@ resolv_server_ip(){
+@@ -341,6 +481,10 @@ resolv_server_ip(){
  				fi
  			fi
  
@@ -237,7 +367,7 @@ index 758ed7a..00b4044 100755
  			if [ -n "$server_ip" ];then
  				echo_date 节点服务器的ip地址解析成功：$server_ip
  				# 解析并记录一次ip，方便插件触发重启设定工作
-@@ -764,11 +795,7 @@ create_dnsmasq_conf(){
+@@ -764,11 +908,7 @@ create_dnsmasq_conf(){
  	rm -rf /tmp/wblist.conf
  	rm -rf /tmp/gfwlist.conf
  	rm -rf /tmp/gfwlist.txt
@@ -250,7 +380,7 @@ index 758ed7a..00b4044 100755
  	rm -rf /tmp/smartdns.conf
  	
  	# custom dnsmasq settings by user
-@@ -906,25 +933,25 @@ create_dnsmasq_conf(){
+@@ -906,25 +1046,25 @@ create_dnsmasq_conf(){
  	#ln_conf
  	if [ -f /tmp/custom.conf ];then
  		#echo_date 创建域自定义dnsmasq配置文件软链接到/jffs/configs/dnsmasq.d/custom.conf
@@ -281,7 +411,7 @@ index 758ed7a..00b4044 100755
  		fi
  	elif [ "$ss_basic_mode" == "6" ];then
  		# 回国模式下默认方案是国内优先，所以gfwlist里的网站不能由127.0.0.1#7913来解析了，应该是国外当地直连
-@@ -936,11 +963,11 @@ create_dnsmasq_conf(){
+@@ -936,11 +1076,11 @@ create_dnsmasq_conf(){
  		echo_date 创建回国模式专用gfwlist的软连接到/jffs/etc/dnsmasq.d/文件夹.
  		[ -z "$ss_direct_user" ] && ss_direct_user="8.8.8.8#53"
  		cat /koolshare/ss/rules/gfwlist.conf|sed "s/127.0.0.1#7913/$ss_direct_user/g" > /tmp/gfwlist.conf
@@ -295,7 +425,7 @@ index 758ed7a..00b4044 100755
  }
  
  start_haveged(){
-@@ -1304,8 +1331,8 @@ resolve_node_ip4json(){
+@@ -1304,8 +1444,8 @@ resolve_node_ip4json(){
  				echo_date "检测到你的json配置的${node_protocol}服务器：$node_server不是ip格式！"
  				echo_date "为了确保${node_protocol}的正常工作，建议配置ip格式的${node_protocol}服务器地址！"
  				echo_date "尝试解析${node_protocol}服务器的ip地址，DNS：$(get_server_resolver)"
@@ -306,7 +436,7 @@ index 758ed7a..00b4044 100755
  				node_server_ip=`nslookup "$node_server" $(get_server_resolver) | sed '1,4d' | awk '{print $3}' | grep -v :|awk 'NR==1{print}'`
  				if [ "$?" == "0" ]; then
  					node_server_ip=`echo $node_server_ip|grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}|:"`
-@@ -2299,9 +2326,9 @@ start_anytls(){
+@@ -2299,9 +2439,9 @@ start_anytls(){
  	# AnyTLS start
  	cd /koolshare/bin
  	if [ -n "$ss_basic_trojan_sni" ]; then
@@ -318,27 +448,51 @@ index 758ed7a..00b4044 100755
  	fi
  	local anytlsPID=$!
  	local i=10
-@@ -2338,6 +2365,10 @@ start_ss2022() {
+@@ -2337,7 +2477,30 @@ start_ss2022() {
+ 	echo_date Shadowsocks 2022 启动成功，pid：$ss2022PID
  }
  
++ss_adblock_stop(){
++	cru d ss_adblock >/dev/null 2>&1
++	[ ! -x /koolshare/scripts/ss_adblock.sh ] || sh /koolshare/scripts/ss_adblock.sh stop 5>&- 6>&- 7>&- 8>&- 9>&- >/dev/null 2>&1
++}
++
++ss_adblock_apply(){
++	[ -x /koolshare/scripts/ss_adblock.sh ] || return 0
++	# Optional filtering fails open; its failure must never restart the proxy.
++	if ! sh /koolshare/scripts/ss_adblock.sh apply 5>&- 6>&- 7>&- 8>&- 9>&- >/dev/null 2>&1; then
++		logger -t fancyss 'Ad filtering could not start; ordinary DNS remains available.'
++	fi
++	cru d ss_adblock >/dev/null 2>&1
++	if [ "$(dbus get ss_basic_enable)" = 1 ] && [ "$(dbus get ss_basic_adblock_enable)" = 1 ] && [ "$(cat /tmp/ss_failover/mode 2>/dev/null)" = proxy ]; then
++		cru a ss_adblock '* * * * * /koolshare/scripts/ss_adblock.sh >/dev/null 2>&1'
++	fi
++}
++
  write_cron_job(){
++	ss_failover_watchdog
 +	cru d ss_uu_coexist >/dev/null 2>&1
 +	if [ -n "$SS_ROUTING_UU_MACS" ]; then
-+		cru a ss_uu_coexist "* * * * * /koolshare/scripts/ss_routing.sh reconcile-uu >/dev/null 2>&1"
++		cru a ss_uu_coexist "* * * * * /koolshare/scripts/ss_routing.sh watch-uu >/dev/null 2>&1"
++		sh /koolshare/scripts/ss_routing.sh watch-uu </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- &
 +	fi
  	sed -i '/ssupdate/d' /var/spool/cron/crontabs/* >/dev/null 2>&1
  	if [ "1" == "$ss_basic_rule_update" ]; then
  		echo_date 添加shadowsocks规则定时更新任务，每天"$ss_basic_rule_update_time"自动检测更新规则.
-@@ -2358,6 +2389,7 @@ write_cron_job(){
+@@ -2358,6 +2521,8 @@ write_cron_job(){
  }
  
  kill_cron_job(){
++	cru d ss_adblock >/dev/null 2>&1
 +	cru d ss_uu_coexist >/dev/null 2>&1
  	if [ -n "`cru l|grep ssupdate`" ];then
  		echo_date 删除shadowsocks规则定时更新任务...
  		sed -i '/ssupdate/d' /var/spool/cron/crontabs/* >/dev/null 2>&1
-@@ -2401,11 +2433,7 @@ load_tproxy(){
+@@ -2399,13 +2564,10 @@ load_tproxy(){
+ 
+ 
  flush_nat(){
++	ss_adblock_stop
  	echo_date 清除iptables规则和ipset...
  	# flush rules and set if any
 -	nat_indexs=`iptables -nvL PREROUTING -t nat |sed 1,2d | sed -n '/SHADOWSOCKS/='|sort -r`
@@ -350,7 +504,7 @@ index 758ed7a..00b4044 100755
  	#iptables -t nat -D PREROUTING -p tcp -j SHADOWSOCKS >/dev/null 2>&1
  	
  	iptables -t nat -F SHADOWSOCKS > /dev/null 2>&1 && iptables -t nat -X SHADOWSOCKS > /dev/null 2>&1
-@@ -2416,32 +2444,20 @@ flush_nat(){
+@@ -2416,32 +2578,20 @@ flush_nat(){
  	iptables -t nat -F SHADOWSOCKS_GLO > /dev/null 2>&1 && iptables -t nat -X SHADOWSOCKS_GLO > /dev/null 2>&1
  	iptables -t nat -F SHADOWSOCKS_HOM > /dev/null 2>&1 && iptables -t nat -X SHADOWSOCKS_HOM > /dev/null 2>&1
  
@@ -391,7 +545,7 @@ index 758ed7a..00b4044 100755
  
  	iptables -t mangle -D QOSO0 -m mark --mark "$ip_prefix_hex" -j RETURN >/dev/null 2>&1
  	# flush ipset
-@@ -2451,16 +2467,8 @@ flush_nat(){
+@@ -2451,16 +2601,8 @@ flush_nat(){
  	ipset -F gfwlist >/dev/null 2>&1 && ipset -X gfwlist >/dev/null 2>&1
  	ipset -F router >/dev/null 2>&1 && ipset -X router >/dev/null 2>&1
  	#remove_redundant_rule
@@ -410,7 +564,7 @@ index 758ed7a..00b4044 100755
  	#remove_route_table
  	#echo_date 删除ip route规则.
  	ip route del local 0.0.0.0/0 dev lo table 310 >/dev/null 2>&1
-@@ -2603,10 +2611,12 @@ lan_acess_control(){
+@@ -2603,10 +2745,12 @@ lan_acess_control(){
  			# 2 acl in OUTPUT（used by koolproxy）
  			iptables -t nat -A SHADOWSOCKS_EXT -p tcp  $(factor $ports "-m multiport --dport") -m mark --mark "$ipaddr_hex" -$(get_jump_mode $proxy_mode) $(get_action_chain $proxy_mode)
  			# 3 acl in SHADOWSOCKS for mangle
@@ -427,7 +581,7 @@ index 758ed7a..00b4044 100755
  			fi
  		done
  
-@@ -2637,6 +2647,8 @@ apply_nat_rules(){
+@@ -2637,6 +2781,8 @@ apply_nat_rules(){
  	echo_date 写入iptables规则到nat表中...
  	# 创建SHADOWSOCKS nat rule
  	iptables -t nat -N SHADOWSOCKS
@@ -436,7 +590,7 @@ index 758ed7a..00b4044 100755
  	# 扩展
  	iptables -t nat -N SHADOWSOCKS_EXT
  	# IP/cidr/白域名 白名单控制（不走ss）
-@@ -2681,6 +2693,9 @@ apply_nat_rules(){
+@@ -2681,6 +2827,9 @@ apply_nat_rules(){
  	[ "$mangle" == "1" ] && ip route add local 0.0.0.0/0 dev lo table 310
  	# 创建游戏模式udp rule
  	[ "$mangle" == "1" ] && iptables -t mangle -N SHADOWSOCKS
@@ -446,7 +600,7 @@ index 758ed7a..00b4044 100755
  	# IP/cidr/白域名 白名单控制（不走ss）
  	[ "$mangle" == "1" ] && iptables -t mangle -A SHADOWSOCKS -p udp -m set --match-set white_list dst -j RETURN
  	# 创建游戏模式udp rule
-@@ -2691,6 +2706,9 @@ apply_nat_rules(){
+@@ -2691,6 +2840,9 @@ apply_nat_rules(){
  	[ "$mangle" == "1" ] && iptables -t mangle -A $(get_action_chain $ss_basic_mode) -p udp -m set ! --match-set chnroute dst -j TPROXY --on-port 3333 --tproxy-mark 0x07
  	#-------------------------------------------------------
  	# 局域网黑名单（不走ss）/局域网黑名单（走ss）
@@ -456,7 +610,7 @@ index 758ed7a..00b4044 100755
  	lan_acess_control
  	#-----------------------FOR ROUTER---------------------
  	# router itself
-@@ -2705,12 +2723,13 @@ apply_nat_rules(){
+@@ -2705,12 +2857,13 @@ apply_nat_rules(){
  	# 如果主模式不是游戏模式，则不需要把SHADOWSOCKS链中剩余udp流量转发给SHADOWSOCKS_GAM，不然会造成其他模式主机的udp也走游戏模式
  	###[ "$mangle" == "1" ] && ss_acl_default_mode=3
  	[ "$ss_acl_default_mode" != "0" ] && [ "$ss_acl_default_mode" != "3" ] && [ "$ss_basic_udp_sync" != "1" ]  && ss_acl_default_mode=0
@@ -475,7 +629,7 @@ index 758ed7a..00b4044 100755
  	[ "$mangle" == "1" ] && iptables -t mangle -A PREROUTING -p udp -j SHADOWSOCKS
  	# QOS开启的情况下
  	QOSO=`iptables -t mangle -S | grep -o QOSO | wc -l`
-@@ -2728,6 +2747,7 @@ dns_hijack_control(){
+@@ -2728,6 +2881,7 @@ dns_hijack_control(){
  			local dest_ipaddr=$(ifconfig br${VLAN_INDEX} | grep "inet addr" | awk '{print $2}'|awk -F ":" '{print $2}')
  			iptables -t nat -N SHADOWSOCKS_DNS_${VLAN_INDEX} >/dev/null 2>&1
  			iptables -t nat -F SHADOWSOCKS_DNS_${VLAN_INDEX} >/dev/null 2>&1
@@ -483,7 +637,7 @@ index 758ed7a..00b4044 100755
  			iptables -t nat -A SHADOWSOCKS_DNS_${VLAN_INDEX} -p udp -j DNAT --to ${dest_ipaddr}:53
  		done
  	fi
-@@ -2735,22 +2755,14 @@ dns_hijack_control(){
+@@ -2735,22 +2889,14 @@ dns_hijack_control(){
  
  
  chromecast(){
@@ -508,7 +662,25 @@ index 758ed7a..00b4044 100755
  		done
  	else
  		echo_date DNS劫持功能未开启，建议开启！
-@@ -2909,14 +2921,10 @@ detect(){
+@@ -2875,7 +3021,7 @@ ss_post_start(){
+ 	mkdir -p /koolshare/ss/postscripts && cd /koolshare/ss/postscripts
+ 	for i in $(find ./ -name 'P*' | sort) ;
+ 	do
+-		trap "" INT QUIT TSTP EXIT
++		trap "" INT QUIT TSTP
+ 		echo_date ------------- 【科学上网】 启动后触发脚本: $i -------------
+ 		if [ -r "$i" ]; then
+ 			$i start
+@@ -2889,7 +3035,7 @@ ss_pre_stop(){
+ 	mkdir -p /koolshare/ss/postscripts && cd /koolshare/ss/postscripts
+ 	for i in $(find ./ -name 'P*' | sort -r) ;
+ 	do
+-		trap "" INT QUIT TSTP EXIT
++		trap "" INT QUIT TSTP
+ 		echo_date ------------- 【科学上网】 关闭前触发脚本: $i ------------
+ 		if [ -r "$i" ]; then
+ 			$i stop
+@@ -2909,14 +3055,10 @@ detect(){
  		close_in_five
  	fi
  	
@@ -527,38 +699,194 @@ index 758ed7a..00b4044 100755
  	fi
  }
  
-@@ -2988,6 +2996,7 @@ umount_dnsmasq_now(){
+@@ -2987,7 +3129,43 @@ umount_dnsmasq_now(){
+ 	esac
  }
  
++ss_failover_watchdog(){
++	cru d ss_failover >/dev/null 2>&1
++	if [ "$(dbus get ss_basic_enable)" = 1 ] && [ "$(dbus get ss_basic_failover_enable)" = 1 ] && ss_routing_is_anytls; then
++		cru a ss_failover "* * * * * /bin/sh /koolshare/scripts/ss_failover.sh tick >/dev/null 2>&1"
++	fi
++}
++ss_failover_enter_direct(){
++	local table rules rc=0
++	ss_failover_set_mode error || return 1
++	ss_adblock_stop || rc=1
++	cru d ss_uu_coexist >/dev/null 2>&1
++	# Detach only our entry hooks. UU processes, policy routes and game sets stay.
++	ss_routing_remove_jumps nat PREROUTING SHADOWSOCKS
++	ss_routing_remove_jumps mangle PREROUTING SHADOWSOCKS
++	ss_routing_remove_output_rules
++	ss_routing_remove_dns_rules
++	for table in nat mangle; do
++		rules=$(iptables -t "$table" -S PREROUTING 2>/dev/null) || rc=1
++		printf '%s\n' "$rules" | grep -Eq -- ' -(j|g) SHADOWSOCKS(_DNS_[0-9]+)?( |$)' && rc=1
++	done
++	rules=$(iptables -t nat -S OUTPUT 2>/dev/null) || rc=1
++	printf '%s\n' "$rules" | grep -Eq -- ' -(j|g) SHADOWSOCKS_EXT( |$)' && rc=1
++	printf '%s\n' "$rules" | grep -Eq -- ' --match-set router dst .* -j REDIRECT .*--to-ports 3333( |$)| --match-set router dst -j REDIRECT --to-ports 3333( |$)' && rc=1
++	restore_conf || rc=1
++	restart_dnsmasq || rc=1
++	[ "$rc" = 0 ] || return 1
++	nvram set ss_mode=0
++	ss_failover_set_mode direct
++}
++ss_failover_manual_reset(){
++	sh /koolshare/scripts/ss_failover.sh reset 7>&- || return 1
++	case "$SS_FAILOVER_ACTION" in stop) cru d ss_failover >/dev/null 2>&1 ;; *) ss_failover_watchdog ;; esac
++}
++
  disable_ss(){
++	ss_adblock_stop
 +	[ -x /koolshare/scripts/ss_health.sh ] && /koolshare/scripts/ss_health.sh stop >/dev/null 2>&1
  	echo_date ======================= 梅林固件 - 【科学上网】 ========================
  	echo_date
  	echo_date ------------------------- 关闭【科学上网】 -----------------------------
-@@ -3007,6 +3016,7 @@ disable_ss(){
+@@ -3007,6 +3185,8 @@ disable_ss(){
  }
  
  apply_ss(){
++	ss_adblock_stop
 +	[ -x /koolshare/scripts/ss_health.sh ] && /koolshare/scripts/ss_health.sh stop >/dev/null 2>&1
  	# router is on boot
  	WAN_ACTION=`ps|grep /jffs/scripts/wan-start|grep -v grep`
  	# now stop first
-@@ -3063,6 +3073,7 @@ apply_ss(){
+@@ -3052,17 +3232,26 @@ apply_ss(){
+ 	[ "$ss_basic_type" == "4" -a "$ss_basic_trojan_binary" == "AnyTLS" ] && start_anytls
+ 	[ "$ss_basic_type" != "2" ] && start_kcp
+ 	[ "$ss_basic_type" != "2" ] && start_dns
++	case "$SS_FAILOVER_ACTION" in failover-switch|failover-direct)
++		ss_failover_guard || { ss_failover_enter_direct; exit 75; } ;;
++	esac
++	[ "$(dbus get ss_basic_enable)" = 1 ] || { ss_failover_enter_direct; exit 75; }
+ 	#===load nat start===
+ 	load_nat
+ 	#===load nat end===
+ 	mount_dnsmasq_now
+-	restart_dnsmasq
++	restart_dnsmasq || close_in_five
++	if ! ss_failover_set_mode proxy; then
++		[ "$ss_basic_failover_enable" != 1 ] || ! ss_routing_is_anytls || close_in_five
++	fi
+ 	auto_start
+ 	write_cron_job
+ 	set_ss_reboot_job
  	set_ss_trigger_job
  	# post-start
  	ss_post_start
++	ss_adblock_apply
 +	[ -x /koolshare/scripts/ss_health.sh ] && /koolshare/scripts/ss_health.sh reset >/dev/null 2>&1
  	echo_date ------------------------ 【科学上网】 启动完毕 ------------------------
  }
  
+@@ -3100,13 +3289,31 @@ get_status(){
+ # =========================================================================
+ 
+ case $ACTION in
++failover-switch)
++	ss_failover_set_mode error || exit 1
++	set_ulimit
++	apply_ss
++	write_numbers
++	unset_lock
++	;;
++failover-direct)
++	ss_failover_guard || exit 75
++	ss_failover_enter_direct || exit 1
++	ss_failover_watchdog
++	;;
+ start)
+ 	set_lock
++	ss_failover_manual_reset || exit 1
+ 	if [ "$ss_basic_enable" == "1" ];then
+ 		logger "[软件中心]: 启动科学上网插件！"
+ 		set_ulimit >> "$LOG_FILE"
+-		apply_ss >> "$LOG_FILE"
+-		write_numbers >> "$LOG_FILE"
++		if [ "$(cat "$SS_FAILOVER_STATE/mode" 2>/dev/null)" = direct ] && [ "$ss_basic_failover_enable" = 1 ] && ss_routing_is_anytls; then
++			ss_failover_enter_direct || exit 1
++			ss_failover_watchdog
++		else
++			apply_ss >> "$LOG_FILE"
++			write_numbers >> "$LOG_FILE"
++		fi
+ 	else
+ 		logger "[软件中心]: 科学上网插件未开启，不启动！"
+ 	fi
+@@ -3115,6 +3322,9 @@ start)
+ 	;;
+ stop)
+ 	set_lock
++	dbus set ss_basic_enable=0
++	cru d ss_failover >/dev/null 2>&1
++	ss_failover_manual_reset || printf '%s\n' 'Failover metadata reset failed; continuing owned service cleanup.' >&2
+ 	ss_pre_stop
+ 	disable_ss
+ 	echo_date
+@@ -3127,9 +3337,14 @@ stop)
+ 	;;
+ restart)
+ 	set_lock
+-	set_ulimit
+-	apply_ss
+-	write_numbers
++	ss_failover_manual_reset || exit 1
++	if [ "$(dbus get ss_basic_enable)" = 1 ]; then
++		set_ulimit
++		apply_ss
++		write_numbers
++	else
++		disable_ss
++	fi
+ 	echo_date
+ 	echo_date "Across the Great Wall we can reach every corner in the world!"
+ 	echo_date
+@@ -3144,10 +3359,16 @@ flush_nat)
+ 	;;
+ *)
+ 	set_lock
++	ss_failover_manual_reset || exit 1
+ 	if [ "$ss_basic_enable" == "1" ];then
+-		set_ulimit
+-		apply_ss
+-		write_numbers
++		if [ "$(cat "$SS_FAILOVER_STATE/mode" 2>/dev/null)" = direct ] && [ "$ss_basic_failover_enable" = 1 ] && ss_routing_is_anytls; then
++			ss_failover_enter_direct || exit 1
++			ss_failover_watchdog
++		else
++			set_ulimit
++			apply_ss
++			write_numbers
++		fi
+ 	fi
+ 	#get_status >> /tmp/ss_start.txt
+ 	unset_lock
 diff --git a/shadowsocks/uninstall.sh b/shadowsocks/uninstall.sh
-index a679ed2..614a0f0 100755
+index a679ed2..6377fda 100755
 --- a/shadowsocks/uninstall.sh
 +++ b/shadowsocks/uninstall.sh
-@@ -4,6 +4,10 @@
+@@ -3,7 +3,26 @@
+ # shadowsocks script for AM380 merlin firmware
  # by sadog (sadoneli@gmail.com) from koolshare.cn
  
- sh /koolshare/ss/ssconfig.sh stop
+-sh /koolshare/ss/ssconfig.sh stop
++dbus set ss_basic_enable=0
++cru d ss_failover >/dev/null 2>&1
++sh /koolshare/ss/ssconfig.sh stop || exit 1
++cru d ss_adblock >/dev/null 2>&1
++if [ -f /koolshare/scripts/ss_adblock.sh ]; then
++	# Hand off draining DNS sockets before deleting their installed dependencies.
++	sh /koolshare/scripts/ss_adblock.sh uninstall 5>&- 6>&- 7>&- 8>&- 9>&- || exit 1
++fi
++if [ -L /koolshare/res/ss-adblock-status.js ] && [ "$(readlink /koolshare/res/ss-adblock-status.js)" = /tmp/ss_adblock.json ]; then
++	rm -f /koolshare/res/ss-adblock-status.js
++fi
++# The private RAM keeper owns ss_adblock and ss_adblock_dns-rules cleanup.
++# It stays until the actual DNS flow count reaches zero, without a fixed TTL.
++rm -f /tmp/ss_adblock.json
++rm -f /koolshare/bin/ss-https-probe /koolshare/res/ss-failover-status.js /tmp/ss_failover.json
++rm -rf /tmp/ss_failover
 +rm -f /koolshare/bin/ss-flock
 +rm -f /koolshare/res/ss-health.js /koolshare/res/ss-health.css /koolshare/res/ss_health.json /koolshare/res/ss-health-status.js
 +rm -rf /tmp/ss_health
@@ -567,7 +895,7 @@ index a679ed2..614a0f0 100755
  sleep 1
  
 diff --git a/shadowsocks/webs/Main_Ss_Content.asp b/shadowsocks/webs/Main_Ss_Content.asp
-index 38a7c32..463d0d9 100755
+index 38a7c32..9efadd6 100755
 --- a/shadowsocks/webs/Main_Ss_Content.asp
 +++ b/shadowsocks/webs/Main_Ss_Content.asp
 @@ -14,11 +14,13 @@
@@ -580,16 +908,15 @@ index 38a7c32..463d0d9 100755
  <script type="text/javascript" src="/popup.js"></script>
  <script type="text/javascript" src="/validator.js"></script>
  <script type="text/javascript" src="/js/jquery.js"></script>
-+<script type="text/javascript" src="/res/ss-health.js"></script>
++<script type="text/javascript" src="/res/ss-health.js?v=r7000.5-ad2"></script>
  <script type="text/javascript" src="/general.js"></script>
  <script type="text/javascript" src="/switcherplugin/jquery.iphone-switch.js"></script>
  <script type="text/javascript" src="/client_function.js"></script>
-@@ -40,12 +42,24 @@ var refreshRate;
- function init() {
+@@ -41,11 +43,30 @@ function init() {
  	show_menu(menu_hook);
  	update_ss_ui(db_ss);
-+	loadAdvancedSettings(db_ss);
  	loadAllConfigs();
++	loadAdvancedSettings(db_ss);
  	decode_show();
  	toggle_func();
  	version_show();
@@ -599,6 +926,13 @@ index 38a7c32..463d0d9 100755
 +		SsHealth.start({
 +			url: "/res/ss-health-status.js",
 +			enabled: db_ss["ss_basic_enable"],
++			failoverEnabled: db_ss["ss_basic_failover_enable"],
++			adblockEnabled: db_ss["ss_basic_adblock_enable"],
++			nodeLabelForId: function (id) {
++				var options = E("ssconf_basic_node").options;
++				for (var i = 0; i < options.length; i++) { if (String(options[i].value) === String(id)) { return options[i].text; } }
++				return "";
++			},
 +			nodeId: db_ss["ssconf_basic_node"],
 +			nodeLabel: E("ssconf_basic_node").selectedIndex >= 0 ? E("ssconf_basic_node").options[E("ssconf_basic_node").selectedIndex].text : ""
 +		});
@@ -609,7 +943,7 @@ index 38a7c32..463d0d9 100755
  	setTimeout("get_ss_status_data()", 500);
  }
  
-@@ -395,12 +409,105 @@ function updateHy2GlobalForm() {
+@@ -395,12 +416,192 @@ function updateHy2GlobalForm() {
  	showhide("ss_basic_hy2_bbr_profile_span", congestionType == "bbr");
  }
  
@@ -618,6 +952,8 @@ index 38a7c32..463d0d9 100755
 +	E("ss_uu_error").innerHTML = "";
 +	E("ss_basic_bypass_macs").removeAttribute("aria-invalid");
 +	E("ss_basic_uu_macs").removeAttribute("aria-invalid");
++	E("ss_basic_uu_tcp_policy").removeAttribute("aria-invalid");
++	E("ss_basic_uu_interval").removeAttribute("aria-invalid");
 +}
 +
 +function validateBypassDevices() {
@@ -650,16 +986,28 @@ index 38a7c32..463d0d9 100755
 +		if (!defaults.hasOwnProperty(key)) { continue; }
 +		var value = config[key];
 +		if (typeof value === "undefined" || value === "") { value = defaults[key]; }
-+		if (key === "ss_basic_anytls_hosts") { value = String(value).replace(/,/g, "\n"); }
++		if (key === "ss_basic_adblock_domains" || key === "ss_basic_adblock_allow") { value = Base64.decode(value || ""); }
++		if (key === "ss_basic_anytls_hosts" || key === "ss_basic_failover_countries") { value = String(value).replace(/,/g, "\n"); }
 +		E(key).value = key === "ss_basic_anytls_alpn" && value === "auto" ? "" : value;
 +	}
++	var select = E("ssconf_basic_node"), catalog = [];
++	if (select && select.options) {
++		for (var i = 0; i < select.options.length; i++) {
++			var id = String(select.options[i].value);
++			if (/^[0-9]{1,6}$/.test(id) && Number(id) > 0 && String(config["ssconf_basic_type_" + id]) === "4" && config["ssconf_basic_trojan_binary_" + id] === "AnyTLS") {
++				catalog.push(id + " · " + select.options[i].text);
++			}
++		}
++	}
++	E("ss_failover_node_catalog").value = catalog.join("\n");
 +}
 +
 +function setAdvancedSection(group, expanded) {
 +	E("ss_" + group + "_advanced_body").style.display = expanded ? "" : "none";
 +	var button = E("ss_" + group + "_advanced_toggle");
 +	button.setAttribute("aria-expanded", expanded ? "true" : "false");
-+	button.value = (group === "anytls" ? "AnyTLS 高级连接设置" : "健康检测设置") + (expanded ? " · 收起" : " · 展开");
++	var labels = { anytls: "AnyTLS 高级连接设置", health: "健康检测设置", failover: "自动故障切换设置", adblock: "域名广告过滤" };
++	button.value = labels[group] + (expanded ? " · 收起" : " · 展开");
 +}
 +
 +function toggleAdvancedSection(group) {
@@ -680,6 +1028,8 @@ index 38a7c32..463d0d9 100755
 +function validateAdvancedSettings() {
 +	clearAdvancedError("anytls");
 +	clearAdvancedError("health");
++	clearAdvancedError("failover");
++	clearAdvancedError("adblock");
 +	if (typeof SsHealth === "undefined") {
 +		alert("设置验证组件未载入，请刷新页面后重试。");
 +		return null;
@@ -690,8 +1040,16 @@ index 38a7c32..463d0d9 100755
 +	}
 +	var result = SsHealth.normalizeAdvanced(values);
 +	if (!result.valid) {
-+		var group = result.field.indexOf("ss_basic_health_") === 0 ? "health" : "anytls";
-+		$(group === "health" ? "#show_btn6" : "#show_btn2").trigger("click");
++		if (result.field.indexOf("ss_basic_uu_") === 0) {
++			$("#show_btn5").trigger("click");
++			E("ss_uu_error").innerHTML = "";
++			E("ss_uu_error").appendChild(document.createTextNode(result.error));
++			E(result.field).setAttribute("aria-invalid", "true");
++			E(result.field).focus();
++			return null;
++		}
++		var group = result.field.indexOf("ss_basic_adblock_") === 0 ? "adblock" : (result.field.indexOf("ss_basic_failover_") === 0 ? "failover" : (result.field.indexOf("ss_basic_health_") === 0 ? "health" : "anytls"));
++		$(group === "anytls" ? "#show_btn2" : "#show_btn6").trigger("click");
 +		setAdvancedSection(group, true);
 +		E("ss_" + group + "_advanced_error").appendChild(document.createTextNode(result.error));
 +		E(result.field).setAttribute("aria-invalid", "true");
@@ -699,6 +1057,69 @@ index 38a7c32..463d0d9 100755
 +		return null;
 +	}
 +	return result.values;
++}
++
++function validateAdblockSettings() {
++	clearAdvancedError("adblock");
++	if (typeof SsHealth === "undefined") {
++		E("ss_adblock_advanced_error").appendChild(document.createTextNode("设置组件未载入，请刷新页面后重试。"));
++		return null;
++	}
++	var result = SsHealth.normalizeAdblock({
++		ss_basic_adblock_enable: E("ss_basic_adblock_enable").value,
++		ss_basic_adblock_domains: E("ss_basic_adblock_domains").value,
++		ss_basic_adblock_allow: E("ss_basic_adblock_allow").value
++	});
++	if (!result.valid) {
++		$("#show_btn6").trigger("click");
++		setAdvancedSection("adblock", true);
++		E("ss_adblock_advanced_error").appendChild(document.createTextNode(result.error));
++		E(result.field).setAttribute("aria-invalid", "true");
++		E(result.field).focus();
++		return null;
++	}
++	return result.values;
++}
++
++function adblockFeedback(message) {
++	E("ss_adblock_save_result").innerHTML = "";
++	E("ss_adblock_save_result").appendChild(document.createTextNode(message));
++}
++
++function saveAdblockSettings() {
++	var values = validateAdblockSettings();
++	if (!values) { return false; }
++	var payload = {
++		ss_basic_adblock_enable: values.ss_basic_adblock_enable,
++		ss_basic_adblock_domains: Base64.encode(values.ss_basic_adblock_domains),
++		ss_basic_adblock_allow: Base64.encode(values.ss_basic_adblock_allow),
++		SystemCmd: "ss_adblock.sh",
++		current_page: "Main_Ss_Content.asp",
++		action_mode: " Refresh "
++	};
++	E("ss_adblock_save").disabled = true;
++	adblockFeedback("正在保存广告设置…");
++	$.ajax({
++		type: "POST", url: "/applydb.cgi?p=ss", contentType: "application/x-www-form-urlencoded", dataType: "text", timeout: 15000,
++		data: $.param(payload),
++		success: function (response) {
++			var redirect = typeof response === "string" && /^\s*<html><head>\s*<meta http-equiv="refresh" content="0; url=([^"<>]+)">\s*(?:<meta http-equiv="Content-Type" content="text\/html">\s*)?<\/head><\/html>\s*$/i.exec(response);
++			var samePage = redirect && (redirect[1] === "/Main_Ss_Content.asp" || redirect[1] === "Main_Ss_Content.asp" || redirect[1] === window.location.protocol + "//" + window.location.host + "/Main_Ss_Content.asp");
++			var completed = typeof response === "string" && /^\s*<script>\s*parent\.done_validating\(\s*(['"])\1\s*,\s*(['"])\2\s*\);\s*<\/script>\s*$/i.test(response);
++			if (typeof response !== "string" || (!samePage && !completed && /<\s*(?:!doctype|html|head|body|form|script)\b/i.test(response))) {
++				adblockFeedback("未能确认保存，管理会话可能已过期，请重新登录后重试。");
++				return;
++			}
++			for (var key in values) {
++				if (values.hasOwnProperty(key)) { db_ss[key] = payload[key]; E(key).value = values[key]; }
++			}
++			adblockFeedback("广告设置已提交，运行状态将自动刷新。");
++			SsHealth.refreshAdblock();
++		},
++		error: function () { adblockFeedback("未能确认保存，请检查管理连接并重试。"); },
++		complete: function () { E("ss_adblock_save").disabled = false; }
++	});
++	return false;
 +}
 +
  function save() {
@@ -715,20 +1136,23 @@ index 38a7c32..463d0d9 100755
  	//stop check status
  	checkss = 10001;
  	E("ss_state2").innerHTML = "国外连接 - " + "Waiting...";
-@@ -420,9 +527,11 @@ function save() {
+@@ -420,9 +621,14 @@ function save() {
  	var params_base64_a = ["ss_dnsmasq", "ss_wan_white_ip", "ss_wan_white_domain", "ss_wan_black_ip", "ss_wan_black_domain", "ss_online_links"];
  	var params_base64_b = ["ss_basic_password", "ss_basic_custom", "ss_basic_hy2_global_json"];
  	// collect data from input
 +	params_input.push("ss_basic_bypass_macs", "ss_basic_uu_macs");
-+	params_input.push("ss_basic_anytls_min_idle", "ss_basic_anytls_idle_check", "ss_basic_anytls_idle_timeout", "ss_basic_anytls_handshake", "ss_basic_anytls_alpn", "ss_basic_anytls_fingerprint", "ss_basic_anytls_hosts", "ss_basic_health_interval", "ss_basic_health_timeout", "ss_basic_health_failures");
++	for (var advancedKey in SsHealth.advancedDefaults) {
++		if (SsHealth.advancedDefaults.hasOwnProperty(advancedKey)) { params_input.push(advancedKey); }
++	}
  	for (var i = 0; i < params_input.length; i++) {
  		if (E(params_input[i])) {
 -			dbus[params_input[i]] = E(params_input[i]).value;
 +			dbus[params_input[i]] = advancedSettings.hasOwnProperty(params_input[i]) ? advancedSettings[params_input[i]] : E(params_input[i]).value;
++			if (params_input[i] === "ss_basic_adblock_domains" || params_input[i] === "ss_basic_adblock_allow") { dbus[params_input[i]] = Base64.encode(dbus[params_input[i]]); }
  		}
  	}
  	// collect data from checkbox
-@@ -2650,43 +2759,60 @@ function version_show() {
+@@ -2650,43 +2856,60 @@ function version_show() {
  	});
  }
  
@@ -822,16 +1246,16 @@ index 38a7c32..463d0d9 100755
  }
  
  function get_udp_status() {
-@@ -3714,7 +3840,7 @@ function set_cron(action) {
+@@ -3714,7 +3937,7 @@ function set_cron(action) {
  								<tr>
  									<td bgcolor="#4D595D" colspan="3" valign="top">
  										<div>&nbsp;</div>
 -										<div class="formfonttitle">梅林固件 - 科学上网插件</div>
-+										<div class="formfonttitle"><img src="/res/icon-shadowsocks.png" class="ss-health-plugin-icon" width="28" height="28" alt="" aria-hidden="true" />梅林固件 - 科学上网插件 <span style="font-size:12px;font-weight:normal">R7000 增强 r3</span></div>
++										<div class="formfonttitle"><img src="/res/icon-shadowsocks.png" class="ss-health-plugin-icon" width="28" height="28" alt="" aria-hidden="true" />梅林固件 - 科学上网插件 <span style="font-size:12px;font-weight:normal">4.38.3-r7000.5</span></div>
  										<div style="float:right; width:15px; height:25px;margin-top:-20px">
  											<img id="return_btn" onclick="reload_Soft_Center();" align="right" style="cursor:pointer;position:absolute;margin-left:-30px;margin-top:-25px;" title="返回软件中心" src="/images/backprev.png" onMouseOver="this.src='/images/backprevclick.png'" onMouseOut="this.src='/images/backprev.png'"></img>
  										</div>
-@@ -3775,28 +3901,41 @@ function set_cron(action) {
+@@ -3775,28 +3998,41 @@ function set_cron(action) {
  												</tr>
                                      		</table>
                                      	</div>
@@ -895,7 +1319,7 @@ index 38a7c32..463d0d9 100755
  										<div id="tablets">
  											<table style="margin:10px 0px 0px 0px;border-collapse:collapse" width="100%" height="37px">
  												<tr width="235px">
-@@ -4727,6 +4866,23 @@ function set_cron(action) {
+@@ -4727,6 +4963,23 @@ function set_cron(action) {
  										</div>
  										<!--=====tablet_2=====-->
  										<div id="tablet_2" style="display: none;">
@@ -919,7 +1343,16 @@ index 38a7c32..463d0d9 100755
  											<table style="margin:-1px 0px 0px 0px;" width="100%" border="1" align="center" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable">
  												<tr id="dns_plan_china">
  													<th width="20%"><a class="hintstyle" href="javascript:void(0);" onclick="openssHint(25)">选择中国DNS</a></th>
-@@ -5621,6 +5777,28 @@ taobao.com
+@@ -4808,7 +5061,7 @@ function set_cron(action) {
+ 															<option value="11">DNSpod DNS【119.29.29.29】</option>
+ 															<option value="12">自定义</option>
+ 														</select>
+-														<input type="text" class="input_ss_table" id="ss_basic_server_resolver_user" name="ss_basic_server_resolver_user" value="">
++														<input type="text" class="input_ss_table" id="ss_basic_server_resolver_user" name="ss_basic_server_resolver_user" value=""><br /><span class="ss-advanced-help">AnyTLS 独立节点解析：支持 IPv4:端口、HTTPS DNS URL；多个上游用逗号分隔，最多 4 个。请按服务商完整配置填写，不要填手机客户端的本地监听地址。</span>
+ 													</td>
+ 												</tr>
+ 												<tr>
+@@ -5621,6 +5874,38 @@ taobao.com
  										</div>
  										<!--====LAN ACL=====-->
  										<div id="tablet_5" style="display: none;">
@@ -939,7 +1372,17 @@ index 38a7c32..463d0d9 100755
 +                                                    <th scope="row"><label for="ss_basic_uu_macs">PS5 / UU 共存设备</label></th>
 +                                                    <td>
 +                                                        <textarea id="ss_basic_uu_macs" name="ss_basic_uu_macs" rows="3" maxlength="4096" placeholder="AA:BB:CC:DD:EE:FF" aria-describedby="ss_uu_help ss_uu_error" autocomplete="off" autocapitalize="off" spellcheck="false" oninput="clearBypassError();"></textarea>
-+                                                        <p id="ss_uu_help" class="ss-device-policy-help">游戏加速规则优先；其余境外 IPv4 TCP（如 YouTube）走路由器代理。UDP 由 UU 或原网络处理，DNS 沿用 UU 与路由器的现有规则。</p>
++                                                        <label for="ss_basic_uu_tcp_policy">其他 TCP 流量策略</label>
++                                                        <select id="ss_basic_uu_tcp_policy" name="ss_basic_uu_tcp_policy" class="input_option" aria-describedby="ss_uu_help ss_uu_error" onchange="clearBypassError();">
++                                                            <option value="gfwlist" selected="selected">gfwlist 分流（依赖路由器 DNS）</option>
++                                                            <option value="foreign">境外 IPv4 TCP 代理</option>
++                                                            <option value="direct">直连（跳过本插件）</option>
++                                                        </select>
++                                                        <label for="ss_basic_uu_interval">UU 规则检查间隔</label>
++                                                        <input type="text" id="ss_basic_uu_interval" name="ss_basic_uu_interval" class="input_ss_table ss-advanced-number" value="5" maxlength="2" inputmode="numeric" aria-describedby="ss_uu_interval_help ss_uu_error" oninput="clearBypassError();" /> <span class="ss-advanced-unit">秒 · 2–30</span>
++                                                        <p id="ss_uu_interval_help" class="ss-device-policy-help">每隔设定秒数检查 UU 规则和路由是否变化，检测到变化后再更新兼容规则。较短的间隔反应更快，也会增加路由器资源开销。保存并应用后生效。</p>
++                                                        <p id="ss_uu_help" class="ss-device-policy-help">UU 动态游戏目标仍优先。gfwlist 依赖路由器 DNS 将域名对应 IP 加入分流集合；UU 接管设备 DNS 时，可选“境外 IPv4 TCP 代理”，让其他境外 TCP 按 IP 规则代理。直连只跳过本插件，不关闭 UU。</p>
++                                                        <p class="ss-device-policy-help">此设置仅控制 IPv4 TCP；UDP 继续由 UU 或原网络处理，不代表 PSN 登录、NAT 测试或游戏加速一定正常。修改后请在 PS5 重新测试网络并重试连接。</p>
 +                                                        <p class="ss-device-policy-help">每行一个 MAC 地址，也可用逗号分隔，最多 32 个。每台设备只选择一种策略，请勿与上方旁路列表重复。保存并应用后生效。</p>
 +                                                        <p id="ss_uu_error" class="ss-device-policy-error" role="alert"></p>
 +                                                    </td>
@@ -948,10 +1391,54 @@ index 38a7c32..463d0d9 100755
  											<table id="ACL_table" style="margin:-1px 0px 0px 0px;" width="100%" border="1" align="center" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable" >
  													<tr>
  														<th style="width:180px;">主机IP地址</th>
-@@ -5669,6 +5847,19 @@ taobao.com
+@@ -5669,6 +5954,63 @@ taobao.com
  										</div>
  										<!--===== addon =====-->
  										<div id="tablet_6" style="display: none;">
++                                            <div class="ss-health ss-health-checking" id="ss_failover_status" aria-live="polite">
++                                                <div class="ss-health-head"><div class="ss-health-heading"><strong id="ss_failover_title" role="status">等待自动切换状态</strong><span id="ss_failover_time" class="ss-health-time"></span></div></div>
++                                                <p id="ss_failover_summary" class="ss-health-note"></p>
++                                                <p id="ss_failover_note" class="ss-health-note">后台每分钟检查；管理页面无需一直打开。</p>
++                                            </div>
++                                            <div class="ss-advanced" id="ss_failover_advanced">
++                                                <input type="button" id="ss_failover_advanced_toggle" class="ss-advanced-toggle" value="自动故障切换设置 · 展开" aria-expanded="false" aria-controls="ss_failover_advanced_body" onclick="toggleAdvancedSection('failover');" />
++                                                <div id="ss_failover_advanced_body" style="display:none;">
++                                                    <p id="ss_failover_advanced_help" class="ss-advanced-help">当前线路连续失败后，先比较同国家/地区候选；同组全部不可用时，再选其他地区 HTTPS 延迟低的可用线路。候选需连续成功后恢复，切换有冷却期。保存并应用后生效。</p>
++                                                    <table width="100%" border="1" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable ss-advanced-table">
++                                                        <tr><th scope="row"><label for="ss_basic_failover_enable">自动故障切换</label></th><td><select id="ss_basic_failover_enable" name="ss_basic_failover_enable" class="input_option" onchange="clearAdvancedError('failover');"><option value="0" selected="selected">关闭</option><option value="1">开启</option></select></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_failover_country">优先国家/地区</label></th><td><input type="text" id="ss_basic_failover_country" name="ss_basic_failover_country" class="input_ss_table" value="auto" maxlength="4" placeholder="auto / HK / JP" aria-describedby="ss_failover_country_help ss_failover_advanced_error" oninput="clearAdvancedError('failover');" /><p id="ss_failover_country_help" class="ss-advanced-help">auto 使用当前线路的国家/地区；也可填写两位代码。分类优先使用下方映射，其次识别节点名称；未知地区不视为同一组，中转入口 IP 不代表出口地区。</p></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_failover_nodes">候选节点 ID</label></th><td><textarea id="ss_basic_failover_nodes" name="ss_basic_failover_nodes" class="input_ss_table" rows="2" maxlength="4096" placeholder="留空包含所有有效 AnyTLS 节点" aria-describedby="ss_failover_nodes_help ss_failover_advanced_error" oninput="clearAdvancedError('failover');"></textarea><p id="ss_failover_nodes_help" class="ss-advanced-help">用逗号或换行分隔节点 ID，最多 128 个，只检测有效 AnyTLS 节点。下方提供节点 ID 对照，状态区也显示当前 ID；请勿填写服务器地址或密码。</p></td></tr>
++                                                        <tr><th scope="row"><label for="ss_failover_node_catalog">AnyTLS 节点 ID 对照</label></th><td><textarea id="ss_failover_node_catalog" rows="4" class="input_ss_table" readonly="readonly" aria-describedby="ss_failover_catalog_help"></textarea><p id="ss_failover_catalog_help" class="ss-advanced-help">仅用于查找已保存节点的 ID 和名称；修改节点后重新打开本页刷新对照。</p></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_failover_countries">节点国家/地区映射</label></th><td><textarea id="ss_basic_failover_countries" name="ss_basic_failover_countries" class="input_ss_table" rows="3" maxlength="8192" placeholder="1=HK&#10;2=JP" aria-describedby="ss_failover_map_help ss_failover_advanced_error" oninput="clearAdvancedError('failover');"></textarea><p id="ss_failover_map_help" class="ss-advanced-help">可选，每行 节点ID=两位代码，最多 128 条；同一节点不能重复指向不同地区。示例只表示格式，不是预置线路。</p></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_failover_failures">线路连续失败次数</label></th><td><input type="text" id="ss_basic_failover_failures" name="ss_basic_failover_failures" class="input_ss_table ss-advanced-number" value="3" maxlength="1" inputmode="numeric" oninput="clearAdvancedError('failover');" /> <span class="ss-advanced-unit">轮 · 1–5</span></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_failover_recoveries">候选连续成功次数</label></th><td><input type="text" id="ss_basic_failover_recoveries" name="ss_basic_failover_recoveries" class="input_ss_table ss-advanced-number" value="2" maxlength="1" inputmode="numeric" oninput="clearAdvancedError('failover');" /> <span class="ss-advanced-unit">次 · 1–3</span></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_failover_cooldown">切换冷却时间</label></th><td><input type="text" id="ss_basic_failover_cooldown" name="ss_basic_failover_cooldown" class="input_ss_table ss-advanced-number" value="120" maxlength="3" inputmode="numeric" oninput="clearAdvancedError('failover');" /> <span class="ss-advanced-unit">秒 · 30–600</span></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_failover_timeout">候选检测超时</label></th><td><input type="text" id="ss_basic_failover_timeout" name="ss_basic_failover_timeout" class="input_ss_table ss-advanced-number" value="5" maxlength="1" inputmode="numeric" oninput="clearAdvancedError('failover');" /> <span class="ss-advanced-unit">秒 · 3–8</span></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_failover_budget">每轮检测预算</label></th><td><input type="text" id="ss_basic_failover_budget" name="ss_basic_failover_budget" class="input_ss_table ss-advanced-number" value="60" maxlength="3" inputmode="numeric" aria-describedby="ss_failover_budget_help ss_failover_advanced_error" oninput="clearAdvancedError('failover');" /> <span class="ss-advanced-unit">秒 · 20–120</span><p id="ss_failover_budget_help" class="ss-advanced-help">至少 3 × 候选超时 + 8 秒。多节点会分批检测；尚未完成的候选不会被误判为全部故障。</p></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_failover_direct">直连保护</label></th><td><select id="ss_basic_failover_direct" name="ss_basic_failover_direct" class="input_option" aria-describedby="ss_failover_direct_help ss_failover_advanced_error" onchange="clearAdvancedError('failover');"><option value="1" selected="selected">开启</option><option value="0">关闭</option></select><p id="ss_failover_direct_help" class="ss-advanced-help">确认当前线路故障后可先恢复本插件原网络路径，再分批找备用节点；无节点可用时持续保护。只保障本来可直连的服务，受限网站仍需要可用代理。不会关闭设备自身 TUN 或 UU；手动关闭代理后不会自动复活。</p></td></tr>
++                                                    </table>
++                                                    <p id="ss_failover_advanced_error" class="ss-device-policy-error" role="alert"></p>
++                                                </div>
++                                            </div>
++                                            <div class="ss-advanced" id="ss_adblock_advanced">
++                                                <input type="button" id="ss_adblock_advanced_toggle" class="ss-advanced-toggle" value="域名广告过滤 · 展开" aria-expanded="false" aria-controls="ss_adblock_advanced_body" onclick="toggleAdvancedSection('adblock');" />
++                                                <div id="ss_adblock_advanced_body" style="display:none;">
++                                                    <div class="ss-health ss-health-disabled" id="ss_adblock_status" aria-live="polite">
++                                                        <div class="ss-health-head"><strong id="ss_adblock_title" role="status">域名广告过滤已关闭</strong></div>
++                                                        <p id="ss_adblock_summary" class="ss-health-note"></p>
++                                                        <p id="ss_adblock_note" class="ss-health-note">仅随路由器代理运行；直连保护或代理关闭时暂停。</p>
++                                                    </div>
++                                                    <p id="ss_adblock_help" class="ss-advanced-help">默认关闭，使用插件内置的小型域名列表，可手动补充，无自动更新。仅过滤普通 IPv4 DNS（53 端口）；加密 DNS 不覆盖，也不能去除与视频同域分发的广告。自带 VPN 旁路和 UU 共存设备整机排除。</p>
++                                                    <table width="100%" border="1" cellpadding="4" cellspacing="0" bordercolor="#6b8fa3" class="FormTable ss-advanced-table">
++                                                        <tr><th scope="row"><label for="ss_basic_adblock_enable">域名广告过滤</label></th><td><select id="ss_basic_adblock_enable" name="ss_basic_adblock_enable" class="input_option" aria-describedby="ss_adblock_help ss_adblock_advanced_error" onchange="clearAdvancedError('adblock');"><option value="0" selected="selected">关闭</option><option value="1">开启</option></select></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_adblock_domains">额外屏蔽域名</label></th><td><textarea id="ss_basic_adblock_domains" name="ss_basic_adblock_domains" rows="4" maxlength="8192" class="input_ss_table" spellcheck="false" autocapitalize="off" placeholder="ads.example.com" aria-describedby="ss_adblock_domains_help ss_adblock_advanced_error" oninput="clearAdvancedError('adblock');"></textarea><p id="ss_adblock_domains_help" class="ss-advanced-help">每行一个完整 ASCII 域名，最多 256 个非空行、8192 字节；包含其子域名。不接受 IP、网址、通配符或尾点。YouTube / Google 媒体依赖、PSN、UU 及本地域名和其上级域名受保护，不能屏蔽。</p></td></tr>
++                                                        <tr><th scope="row"><label for="ss_basic_adblock_allow">放行域名</label></th><td><textarea id="ss_basic_adblock_allow" name="ss_basic_adblock_allow" rows="3" maxlength="8192" class="input_ss_table" spellcheck="false" autocapitalize="off" placeholder="needed.example.com" aria-describedby="ss_adblock_allow_help ss_adblock_advanced_error" oninput="clearAdvancedError('adblock');"></textarea><p id="ss_adblock_allow_help" class="ss-advanced-help">每行一个完整域名，同样最多 256 行、8192 字节。放行该域名和其子域名，优先于内置及额外屏蔽规则。关闭时也可先编辑列表。</p></td></tr>
++                                                    </table>
++                                                    <p id="ss_adblock_advanced_error" class="ss-device-policy-error" role="alert"></p>
++                                                    <input type="button" id="ss_adblock_save" class="ss_btn" value="仅保存广告设置" onclick="saveAdblockSettings();" />
++                                                    <p id="ss_adblock_save_result" class="ss-advanced-help" role="status" aria-live="polite"></p>
++                                                </div>
++                                            </div>
 +                                            <div class="ss-advanced" id="ss_health_advanced">
 +                                                <input type="button" id="ss_health_advanced_toggle" class="ss-advanced-toggle" value="健康检测设置 · 展开" aria-expanded="false" aria-controls="ss_health_advanced_body" onclick="toggleAdvancedSection('health');" />
 +                                                <div id="ss_health_advanced_body" style="display:none;">

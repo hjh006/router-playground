@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shlex
 import stat
 import subprocess
 import sys
@@ -76,6 +77,34 @@ elif command == "nvram":
     if len(args) != 2 or args[0] != "set" or not args[1].startswith("ss_foreign_state="):
         raise RuntimeError("unexpected nvram access")
     event(value=args[1])
+elif command == "health-entry":
+    inherited = []
+    for fd in (8, 9):
+        try: os.fstat(fd); inherited.append(fd)
+        except OSError: pass
+    event(action="entry", action_arg=args[0], inherited_lock_fds=inherited)
+elif command == "ss-https-probe":
+    if len(args) != 10:
+        raise RuntimeError("unexpected HTTPS probe arguments")
+    options = dict(zip(args[::2], args[1::2]))
+    timeout = str(control.get("health_timeout", ""))
+    if timeout not in ("6", "8", "10"): timeout = "10"
+    if (set(options) != {"-proxy", "-ca", "-target", "-timeout", "-format"}
+            or options.get("-proxy") != "127.0.0.1:23456"
+            or options.get("-ca") != str(root / "koolshare/ss/rules/cacert.pem")
+            or options.get("-target") not in ("google", "youtube", "telegram")
+            or options.get("-timeout") != timeout + "s" or options.get("-format") != "curl"):
+        event(error="unexpected HTTPS probe contract"); sys.exit(2)
+    inherited = []
+    for fd in (8, 9):
+        try: os.fstat(fd); inherited.append(fd)
+        except OSError: pass
+    target = options["-target"]
+    event(target=target, timeout=int(timeout), inherited_lock_fds=inherited)
+    gate(target=target)
+    response = control.get("responses", {}).get(target, {"rc": 0, "http": "204", "seconds": "0.100"})
+    print(str(response.get("http", "000")) + "|" + str(response.get("seconds", "0.000")), end="")
+    sys.exit(response.get("rc", 0))
 elif command == "curl":
     values = {"--cacert", "--socks5-hostname", "--connect-timeout", "--max-time", "-o", "--write-out"}
     switches = {"-sS", "-I"}
@@ -155,8 +184,8 @@ class HealthTests(unittest.TestCase):
         temporary.write_text(json.dumps(self.control))
         temporary.replace(self.root / "control.json")
 
-    def start(self, action="refresh", run="main"):
-        process = subprocess.Popen(["/bin/sh", str(SCRIPT), action], env=dict(self.env, HEALTH_TEST_RUN_ID=run),
+    def start(self, action="refresh", run="main", script=None):
+        process = subprocess.Popen(["/bin/sh", str(script or SCRIPT), action], env=dict(self.env, HEALTH_TEST_RUN_ID=run),
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
         self.processes.append(process)
         return process
@@ -233,6 +262,78 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(self.run_health()["status"], "healthy")
         self.assertEqual(len(self.events("curl")), 3)
         self.assertFalse(any("error" in event for event in self.events()))
+
+    def enable_modern_probe(self):
+        (self.bin / 'ss-https-probe').symlink_to('mock_dispatch.py')
+
+    def test_modern_probe_is_preferred_and_uses_verified_ca_proxy_and_deadline(self):
+        self.enable_modern_probe()
+        responses = self.all_responses(200)
+        responses['google']['seconds'] = '0.100'
+        responses['telegram']['seconds'] = '0.300'
+        self.configure(health_timeout='8', responses=responses)
+        result = self.run_health()
+        self.assertEqual((result['status'], result['last_latency_ms']), ('healthy', 200))
+        events = self.events('ss-https-probe')
+        self.assertEqual([event['target'] for event in events], ['google', 'youtube', 'telegram'])
+        self.assertTrue(all(event['timeout'] == 8 and event['inherited_lock_fds'] == [] for event in events))
+        self.assertFalse(self.events('curl'))
+
+    def test_modern_probe_failures_never_retry_through_legacy_curl(self):
+        self.enable_modern_probe()
+        for rc, expected in [(60, 'tls_error'), (35, 'tls_error'), (28, 'timeout'),
+                             (7, 'network_error'), (2, 'local_error')]:
+            with self.subTest(rc=rc):
+                self.configure(health_failures='1', responses=self.all_responses(rc=rc))
+                result = self.run_health()
+                self.assertEqual(result['status'], 'down')
+                self.assertEqual([target['state'] for target in result['targets']], [expected] * 3)
+                self.assertTrue(all(target['latency_ms'] is None for target in result['targets']))
+        self.assertFalse(self.events('curl'))
+
+    def test_modern_completed_http_error_keeps_health_http_error_schema(self):
+        self.enable_modern_probe()
+        responses = self.all_responses()
+        responses['youtube']['http'] = '503'
+        self.configure(responses=responses)
+        result = self.run_health()
+        self.assertEqual((result['status'], result['consecutive_failures']), ('degraded', 0))
+        self.assertEqual(result['targets'][1]['state'], 'http_error')
+        self.assertEqual(result['targets'][1]['http_code'], 503)
+        self.assertFalse(self.events('curl'))
+
+    def test_nonexecutable_modern_probe_keeps_legacy_backend(self):
+        probe = self.bin / 'ss-https-probe'
+        probe.write_text('not executable\n')
+        probe.chmod(0o644)
+        self.assertEqual(self.run_health()['status'], 'healthy')
+        self.assertEqual(len(self.events('curl')), 3)
+
+    def test_exit_explicitly_unlocks_worker_and_commit_descriptors(self):
+        self.run_health()
+        for fd in (8, 9):
+            self.assertTrue(any(event.get('action') == 'acquired' and event.get('mode') == '-u'
+                                and event.get('fd') == fd for event in self.events('flock')))
+
+    def test_reset_child_closes_inherited_descriptors_without_unlocking_its_new_worker(self):
+        (self.bin / 'health-entry').symlink_to('mock_dispatch.py')
+        cloned = self.root / 'health-copy.sh'
+        source = SCRIPT.read_text()
+        cloned.write_text('#!/bin/sh\n' + shlex.quote(str(self.bin / 'health-entry')) +
+                          ' "$1"\n' + source.split('\n', 1)[1])
+        cloned.chmod(0o755)
+        self.configure(gate={'command': 'curl', 'run': 'reset-parent', 'target': 'google'})
+        self.finish(self.start('reset', run='reset-parent', script=cloned))
+        self.wait_for(lambda: (self.root / 'curl.reset-parent.blocked').exists())
+        entries = self.events('health-entry')
+        self.assertEqual([event['action_arg'] for event in entries], ['reset', 'refresh'])
+        self.assertTrue(all(event['inherited_lock_fds'] == [] for event in entries))
+        self.finish(self.start('force', run='parallel'))
+        self.assertEqual(len(self.events('curl')), 1)
+        self.release('reset-parent')
+        self.wait_for(lambda: self.snapshot().get('total') == 1)
+        self.run_health('refresh', run='after-reset')
+        self.assertEqual(len(self.events('curl')), 3)
 
     def test_cache_expires_at_thirty_seconds(self):
         first = self.run_health("refresh")

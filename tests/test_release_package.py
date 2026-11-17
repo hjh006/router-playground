@@ -26,7 +26,7 @@ class GenericReleaseTest(unittest.TestCase):
             files += [root / 'shadowsocks' / name for name in builder.FILES
                       if not name.startswith('bin/') and name != 'scripts/uninstall_shadowsocks.sh']
             files += [work / 'r7000-client/dist' / name for name in
-                      ('anytls-client-linux-armv5-r7000.3', 'ss-flock-linux-armv5')]
+                      ('anytls-client-linux-armv5-r7000.3', 'ss-flock-linux-armv5', 'ss-https-probe-linux-armv5')]
             for file in files:
                 file.parent.mkdir(parents=True, exist_ok=True)
                 file.write_bytes(b'synthetic-public-payload\n')
@@ -48,7 +48,7 @@ class GenericReleaseTest(unittest.TestCase):
             with tarfile.open(fileobj=io.BytesIO(first), mode='r:gz') as tar:
                 members = tar.getmembers()
                 regular = {m.name: tar.extractfile(m).read() for m in members if m.isfile()}
-                self.assertEqual(len(regular), 20)
+                self.assertEqual(len(regular), 23)
                 self.assertFalse(any('private-settings' in n for n in regular))
                 for member in members:
                     self.assertEqual((member.uid, member.gid, member.uname, member.gname,
@@ -56,9 +56,13 @@ class GenericReleaseTest(unittest.TestCase):
                 for data in regular.values():
                     self.assertNotIn(marker.encode(), data)
                 meta = json.loads(regular['shadowsocks/BUILD.json'])
+                self.assertEqual(meta['build'], '4.38.3-r7000.5')
                 self.assertIs(meta['personal_settings_included'], False)
+                self.assertIn('shadowsocks/payload/bin/ss-https-probe',regular)
+                self.assertIn('shadowsocks/payload/scripts/ss_failover.sh',regular)
+                self.assertIn('shadowsocks/payload/scripts/ss_adblock.sh',regular)
                 manifest = regular['shadowsocks/manifest.md5'].decode().splitlines()
-                self.assertEqual(len(manifest), 17)
+                self.assertEqual(len(manifest), 20)
                 for line in manifest:
                     digest, name = line.split()
                     self.assertEqual(hashlib.md5(regular['shadowsocks/payload/' + name]).hexdigest(), digest)

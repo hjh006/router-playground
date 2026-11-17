@@ -13,7 +13,7 @@ fail() { printf 'Full installation: %s\n' "$1" >&2; exit 1; }
 allowed_path() {
   case "/$1/" in *'/../'*|*'/./'*|*'//'*) return 1 ;; esac
   case "$1" in
-    bin/anytls|bin/ss-flock|bin/base64_encode|bin/cdns|bin/chinadns|bin/chinadns1|bin/chinadns-ng|bin/client_linux_arm5|bin/dns2socks|bin/dnsmasq|bin/haproxy|bin/haveged|bin/hysteria|bin/httping|bin/https_dns_proxy|bin/jq|bin/koolbox|bin/koolgame|bin/naive|bin/obfs-local|bin/pdu|bin/resolveip|bin/rss-local|bin/rss-redir|bin/smartdns|bin/speederv1|bin/speederv2|bin/ss-local|bin/ss-redir|bin/ss-tunnel|bin/udp2raw|bin/xray) return 0 ;;
+    bin/anytls|bin/ss-flock|bin/ss-https-probe|bin/base64_encode|bin/cdns|bin/chinadns|bin/chinadns1|bin/chinadns-ng|bin/client_linux_arm5|bin/dns2socks|bin/dnsmasq|bin/haproxy|bin/haveged|bin/hysteria|bin/httping|bin/https_dns_proxy|bin/jq|bin/koolbox|bin/koolgame|bin/naive|bin/obfs-local|bin/pdu|bin/resolveip|bin/rss-local|bin/rss-redir|bin/smartdns|bin/speederv1|bin/speederv2|bin/ss-local|bin/ss-redir|bin/ss-tunnel|bin/udp2raw|bin/xray) return 0 ;;
     scripts/ss_*.sh|scripts/uninstall_shadowsocks.sh|ss/ssconfig.sh|ss/version|ss/cru/*.sh|ss/rules/*|webs/Main_Ss*.asp|res/layer/*) return 0 ;;
     res/shadowsocks.css|res/ss-menu.js|res/ss-health.js|res/ss-health.css|res/icon-shadowsocks.png|res/ss_proc_status.htm|res/ss_udp_status.htm|res/all.png|res/chn.png|res/game.png|res/gameV2.png|res/gfw.png|res/gfwlist.png) return 0 ;;
     bin/rss-tunnel|bin/base64|bin/shuf|bin/netstat|bin/base64_decode|init.d/S99socks5.sh) return 0 ;;
@@ -22,7 +22,7 @@ allowed_path() {
 }
 allowed_key() {
   case "$1" in
-    ss_basic_enable|ss_basic_mode|ss_basic_allowinsecure|ss_basic_bypass_macs|ss_basic_uu_macs|ss_basic_anytls_min_idle|ss_basic_anytls_idle_check|ss_basic_anytls_idle_timeout|ss_basic_anytls_handshake|ss_basic_anytls_alpn|ss_basic_anytls_fingerprint|ss_basic_anytls_hosts|ss_basic_health_interval|ss_basic_health_timeout|ss_basic_health_failures|ss_basic_rule_update|ss_basic_node_update|ss_basic_server_resolver|ss_basic_ss_v2ray_plugin|ss_dns_china|ss_foreign_dns|ss_acl_default_mode|ss_acl_default_port|ss_basic_version_local|ss_basic_install_status|softcenter_module_shadowsocks_install|softcenter_module_shadowsocks_version|softcenter_module_shadowsocks_title|softcenter_module_shadowsocks_description|softcenter_module_shadowsocks_home_url) return 0 ;;
+    ss_basic_enable|ss_basic_mode|ss_basic_allowinsecure|ss_basic_adblock_enable|ss_basic_adblock_domains|ss_basic_adblock_allow|ss_basic_bypass_macs|ss_basic_uu_macs|ss_basic_uu_tcp_policy|ss_basic_uu_interval|ss_basic_failover_enable|ss_basic_failover_country|ss_basic_failover_nodes|ss_basic_failover_countries|ss_basic_failover_failures|ss_basic_failover_recoveries|ss_basic_failover_cooldown|ss_basic_failover_timeout|ss_basic_failover_budget|ss_basic_failover_direct|ss_basic_anytls_min_idle|ss_basic_anytls_idle_check|ss_basic_anytls_idle_timeout|ss_basic_anytls_handshake|ss_basic_anytls_alpn|ss_basic_anytls_fingerprint|ss_basic_anytls_hosts|ss_basic_health_interval|ss_basic_health_timeout|ss_basic_health_failures|ss_basic_rule_update|ss_basic_node_update|ss_basic_server_resolver|ss_basic_server_resolver_user|ss_basic_ss_v2ray_plugin|ss_dns_china|ss_foreign_dns|ss_acl_default_mode|ss_acl_default_port|ss_basic_version_local|ss_basic_install_status|softcenter_module_shadowsocks_install|softcenter_module_shadowsocks_version|softcenter_module_shadowsocks_title|softcenter_module_shadowsocks_description|softcenter_module_shadowsocks_home_url) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -174,7 +174,7 @@ while IFS= read -r relative; do
   allowed_path "$relative" || fail 'A full payload path is outside the plugin allowlist.'
   case "$relative" in bin/rss-tunnel|bin/base64|bin/shuf|bin/netstat|bin/base64_decode|init.d/S99socks5.sh|scripts/ss_install.sh) fail 'The full payload contains a reserved generated path.' ;; esac
 done < "$WORK/paths"
-for required in bin/anytls bin/ss-flock bin/koolbox bin/base64_encode bin/rss-local scripts/ss_socks5.sh scripts/uninstall_shadowsocks.sh ss/version ss/ssconfig.sh webs/Main_Ss_Content.asp; do
+for required in bin/anytls bin/ss-flock bin/ss-https-probe bin/koolbox bin/base64_encode bin/rss-local scripts/ss_socks5.sh scripts/ss_failover.sh scripts/ss_adblock.sh scripts/uninstall_shadowsocks.sh ss/version ss/ssconfig.sh webs/Main_Ss_Content.asp; do
   grep -Fqx "$required" "$WORK/paths" || fail 'A required full payload file is missing.'
 done
 [ "$(cat "$FILES/ss/version")" = 4.38.3 ] || fail 'The full payload is not the supported baseline.'
@@ -184,6 +184,7 @@ while IFS= read -r relative; do
 done < "$WORK/paths"
 "$FILES/bin/anytls" -version > "$WORK/client-version" 2>&1 || fail 'The enhanced client cannot run on this router.'
 grep -q -- '-r7000\.' "$WORK/client-version" || fail 'The full payload client is not the enhanced build.'
+"$FILES/bin/ss-https-probe" -h > "$WORK/probe-help" 2>&1 || fail 'The full payload HTTPS probe cannot run on this router.'
 (
   exec 9>"$WORK/flock-test"
   "$RUNTIME_TOOL" -n 9 || exit 1
@@ -250,11 +251,26 @@ while IFS= read -r relative; do
   else printf '%s|absent|0\n' "$relative" >> "$BACKUP/files.list"; fi
 done < "$WORK/destinations"
 cat > "$WORK/defaults" <<'DEFAULTS'
+ss_basic_adblock_enable=0
+ss_basic_adblock_domains=
+ss_basic_adblock_allow=
 ss_basic_enable=0
 ss_basic_mode=1
 ss_basic_allowinsecure=0
 ss_basic_bypass_macs=
 ss_basic_uu_macs=
+ss_basic_uu_tcp_policy=gfwlist
+ss_basic_uu_interval=5
+ss_basic_failover_enable=0
+ss_basic_failover_country=auto
+ss_basic_failover_nodes=
+ss_basic_failover_countries=
+ss_basic_failover_failures=3
+ss_basic_failover_recoveries=2
+ss_basic_failover_cooldown=120
+ss_basic_failover_timeout=5
+ss_basic_failover_budget=60
+ss_basic_failover_direct=1
 ss_basic_anytls_min_idle=0
 ss_basic_anytls_idle_check=30
 ss_basic_anytls_idle_timeout=30
@@ -268,6 +284,7 @@ ss_basic_health_failures=3
 ss_basic_rule_update=0
 ss_basic_node_update=0
 ss_basic_server_resolver=1
+ss_basic_server_resolver_user=
 ss_basic_ss_v2ray_plugin=0
 ss_dns_china=11
 ss_foreign_dns=3
@@ -278,9 +295,32 @@ ss_basic_install_status=0
 softcenter_module_shadowsocks_install=4
 softcenter_module_shadowsocks_version=4.38.3
 softcenter_module_shadowsocks_title=科学上网
-softcenter_module_shadowsocks_description=科学上网 R7000 增强 r3 for Merlin 380
+softcenter_module_shadowsocks_description=科学上网 R7000 增强 r5 for Merlin 380
 softcenter_module_shadowsocks_home_url=Main_Ss_Content.asp
 DEFAULTS
+# Exercise the same pure schema validator used by service starts; no runtime is
+# created, no service is started, and only the fixed proposed defaults are read.
+(
+  trap - 0 HUP INT TERM
+  dbus() {
+    [ "${1:-}" = get ] || return 1
+    awk -F= -v key="${2:-}" '$1==key {print substr($0,length($1)+2);found=1;exit} END {if(!found)exit 1}' "$WORK/defaults"
+  }
+  set -- validate
+  . "$FILES/scripts/ss_routing.sh"
+  ss_routing_load_bypass_macs || exit 1
+  . "$FILES/scripts/ss_failover.sh"
+) || fail 'The full payload routing/failover defaults are invalid.'
+(
+  trap - 0 HUP INT TERM
+  dbus() {
+    [ "${1:-}" = get ] || return 1
+    awk -F= -v key="${2:-}" '$1==key {print substr($0,length($1)+2);found=1;exit} END {if(!found)exit 1}' "$WORK/defaults"
+  }
+  SS_ADBLOCK_LIBRARY=0
+  set -- validate
+  . "$FILES/scripts/ss_adblock.sh"
+) || fail 'The full payload ad-domain defaults are invalid.'
 : > "$BACKUP/dbus.list"
 while IFS='=' read -r key value; do
   allowed_key "$key" || fail 'An internal settings key is invalid.'

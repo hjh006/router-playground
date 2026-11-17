@@ -4,6 +4,82 @@ SS_DNS_STATE=/jffs/.fancyss-dns
 SS_DNS_HOOK=/jffs/scripts/dnsmasq.postconf
 SS_DNS_TEMPLATE=/koolshare/ss/rules/dnsmasq.postconf
 
+ss_dns_normalize_resolver() {
+	# Read through stdin: awk -v interprets backslash escapes in raw input.
+	# Commas delimit at most four upstreams; URL commas must be percent encoded.
+	# Validate every endpoint before printing anything, including private URLs.
+	printf '%s\n' "${1-}" | LC_ALL=C awk '
+		function ipv4(address, octets,n,i) {
+			if (address !~ /^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/) return 0
+			n=split(address,octets,".")
+			if (n!=4) return 0
+			for (i=1;i<=n;i++) {
+				if (length(octets[i])>3 || (length(octets[i])>1 && substr(octets[i],1,1)=="0") || octets[i]+0>255) return 0
+			}
+			return 1
+		}
+		function port_valid(port) {
+			return port ~ /^[0-9]+$/ && length(port)<=5 && port+0>=1 && port+0<=65535
+		}
+		function hostname(host, labels,n,i) {
+			if (length(host)>253 || host !~ /^[A-Za-z0-9.-]+$/) return 0
+			if (host ~ /^[0-9.]+$/) return ipv4(host)
+			n=split(host,labels,".")
+			for (i=1;i<=n;i++) {
+				if (length(labels[i])<1 || length(labels[i])>63 || labels[i] ~ /^-/ || labels[i] ~ /-$/) return 0
+			}
+			return 1
+		}
+		function endpoint(raw, parts,n,port,rest,slash,authority,host,tail,i) {
+			if (substr(raw,1,8)=="https://") {
+				rest=substr(raw,9)
+				slash=index(rest,"/")
+				if (!slash) return ""
+				authority=substr(rest,1,slash-1)
+				tail=substr(rest,slash)
+				n=split(authority,parts,":")
+				if (n<1 || n>2 || !hostname(parts[1])) return ""
+				host=tolower(parts[1]); port=""
+				if (n==2) {
+					if (!port_valid(parts[2])) return ""
+					port=sprintf(":%d",parts[2]+0)
+				}
+				# A conservative ASCII URI alphabet excludes shell metacharacters.
+				# Ampersand and equals remain valid quoted query/path characters.
+				if (tail !~ /^\/[A-Za-z0-9._~:\/?%&=+@-]*$/) return ""
+				for (i=1;i<=length(tail);i++) {
+					if (substr(tail,i,1)=="%") {
+						if (substr(tail,i+1,2) !~ /^[0-9A-Fa-f][0-9A-Fa-f]$/) return ""
+						i+=2
+					}
+				}
+				return "https://" host port tail
+			}
+			n=split(raw,parts,":")
+			if (n<1 || n>2 || !ipv4(parts[1])) return ""
+			port=53
+			if (n==2) {
+				if (!port_valid(parts[2])) return ""
+				port=parts[2]+0
+			}
+			return sprintf("%s:%d",parts[1],port)
+		}
+		NR != 1 {bad=1}
+		NR == 1 {
+			count=split($0,upstreams,",")
+			if (count<1 || count>4) {bad=1; next}
+			for (item=1;item<=count;item++) {
+				normalized[item]=endpoint(upstreams[item])
+				if (normalized[item]=="") bad=1
+			}
+		}
+		END {
+			if (NR!=1 || bad) exit 1
+			for (item=1;item<=count;item++) printf "%s%s",(item==1?"":","),normalized[item]
+			printf "\n"
+		}'
+}
+
 ss_dns_is_owned_wrapper() {
 	[ -f "$SS_DNS_STATE/wrapper" ] && [ -f "$SS_DNS_HOOK" ] &&
 		[ ! -L "$SS_DNS_HOOK" ] && cmp -s "$SS_DNS_HOOK" "$SS_DNS_STATE/wrapper"
@@ -153,6 +229,12 @@ ss_dns_install_link() {
 }
 
 ss_dns_write_server_config() {
-	printf 'server=/%s/%s#53\n' "$1" "$2" > /tmp/fancyss-server.conf || return 1
+	local resolver address port
+	resolver=$(ss_dns_normalize_resolver "${2-}") || return 1
+	# dnsmasq server= accepts one UDP resolver here, never DoH or a list.
+	case "$resolver" in https://*|*,*) return 1 ;; esac
+	address=${resolver%:*}
+	port=${resolver##*:}
+	printf 'server=/%s/%s#%s\n' "$1" "$address" "$port" > /tmp/fancyss-server.conf || return 1
 	ss_dns_install_link /tmp/fancyss-server.conf /jffs/configs/dnsmasq.d/fancyss-server.conf
 }

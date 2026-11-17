@@ -43,7 +43,37 @@ ss_routing_load_bypass_macs() {
 	for uu_mac in $SS_ROUTING_UU_MACS; do
 		printf '%s\n' "$SS_ROUTING_BYPASS_MACS" | grep -Fqx "$uu_mac" && return 1
 	done
+	ss_routing_load_uu_tcp_policy || return 1
+	ss_routing_load_uu_interval || return 1
 	return 0
+}
+
+ss_routing_load_uu_interval() {
+	local value
+	value=$(dbus get ss_basic_uu_interval 2>/dev/null)
+	[ -n "$value" ] || value=5
+	case "$value" in *[!0-9]*|'') return 1 ;; esac
+	[ "${#value}" -le 2 ] && [ "$value" -ge 2 ] && [ "$value" -le 30 ] || return 1
+	SS_ROUTING_UU_INTERVAL=$value
+}
+
+ss_routing_load_uu_tcp_policy() {
+	local raw_policy
+	raw_policy=$(dbus get ss_basic_uu_tcp_policy 2>/dev/null)
+	case "$raw_policy" in
+		'') SS_ROUTING_UU_TCP_POLICY=gfwlist ;;
+		gfwlist|foreign|direct) SS_ROUTING_UU_TCP_POLICY=$raw_policy ;;
+		*) return 1 ;;
+	esac
+}
+
+ss_routing_uu_target_chain() {
+	case "${SS_ROUTING_UU_TCP_POLICY:-gfwlist}" in
+		gfwlist) printf '%s\n' SHADOWSOCKS_GFW ;;
+		foreign) printf '%s\n' SHADOWSOCKS_CHN ;;
+		direct) printf '%s\n' RETURN ;;
+		*) return 1 ;;
+	esac
 }
 
 ss_routing_is_anytls() {
@@ -63,14 +93,21 @@ ss_routing_add_mac_returns() {
 }
 
 ss_routing_add_uu_tcp_routes() {
-	local uu_mac
+	local uu_mac target_chain
+	target_chain=$(ss_routing_uu_target_chain) || return 1
 	for uu_mac in $SS_ROUTING_UU_MACS; do
+		if [ "$target_chain" = RETURN ]; then
+			iptables -t nat -A SHADOWSOCKS -p tcp -m mac --mac-source "$uu_mac" \
+				-j RETURN || return 1
+			continue
+		fi
 		# Start fail-closed for UU while discovering its policy-route targets.
 		iptables -t nat -A SHADOWSOCKS -p tcp -m mac --mac-source "$uu_mac" \
 			-j RETURN || return 1
 		iptables -t nat -A SHADOWSOCKS -p tcp -m mac --mac-source "$uu_mac" \
-			-g SHADOWSOCKS_CHN || return 1
+			-g "$target_chain" || return 1
 	done
+	[ "$target_chain" != RETURN ] || return 0
 	ss_routing_update_uu_tcp_bypasses
 }
 
@@ -84,9 +121,19 @@ ss_routing_uu_main_position() {
 		$1 == "-A" && $2 == "SHADOWSOCKS" {
 			position++
 			if (NF == 10 && $3 == "-p" && $4 == "tcp" && $5 == "-m" && $6 == "mac" && $7 == "--mac-source" && toupper($8) == mac &&
-				(($9 == "-g" && target == "SHADOWSOCKS_CHN") || ($9 == "-j" && target == "RETURN")) && $10 == target) {
+				(($9 == "-g" && ($10 == "SHADOWSOCKS_CHN" || $10 == "SHADOWSOCKS_GFW") && (target == "GOTO" || $10 == target)) ||
+				 ($9 == "-j" && target == "RETURN" && $10 == "RETURN"))) {
 				print position; exit
 			}
+		}'
+}
+
+ss_routing_uu_set_position() {
+	iptables -t nat -S SHADOWSOCKS 2>/dev/null | awk -v mac="$1" -v name="$2" '
+		$1=="-A" && $2=="SHADOWSOCKS" {
+			position++
+			if (NF==15 && $3=="-p" && $4=="tcp" && $5=="-m" && $6=="mac" && $7=="--mac-source" && toupper($8)==mac &&
+				$9=="-m" && $10=="set" && $11=="--match-set" && $12==name && $13=="dst" && $14=="-j" && $15=="RETURN") {print position;exit}
 		}'
 }
 
@@ -132,21 +179,32 @@ ss_routing_uu_route_cidrs() {
 
 ss_routing_update_uu_tcp_bypasses() {
 	local uu_mac set_name goto_position guard_position uu_ip tables table found_tables
-	local state rules_file routes_file cidrs_file restore_file prerouting_file temp_set parse_rc have_mapping have_claim
+	local state rules_file routes_file cidrs_file restore_file prerouting_file temp_set parse_rc have_mapping have_claim target_chain set_position valid_guard
+	target_chain=$(ss_routing_uu_target_chain) || return 1
+	if [ "$target_chain" = RETURN ]; then
+		ss_routing_sync_uu_policy_routes
+		return
+	fi
 	state=${SS_ROUTING_UU_STATE:-/tmp/ss_uu_routing}
 	for uu_mac in $SS_ROUTING_UU_MACS; do
-		goto_position=$(ss_routing_uu_main_position "$uu_mac" SHADOWSOCKS_CHN)
+		goto_position=$(ss_routing_uu_main_position "$uu_mac" "$target_chain")
 		[ -n "$goto_position" ] || continue
-		guard_position=$(ss_routing_uu_main_position "$uu_mac" RETURN)
-		if [ -z "$guard_position" ] || [ "$guard_position" -ge "$goto_position" ]; then
-			iptables -t nat -I SHADOWSOCKS "$goto_position" -p tcp -m mac \
-				--mac-source "$uu_mac" -j RETURN || return 1
-		fi
 		set_name=$(ss_routing_uu_set_name "$uu_mac")
-		# A full guard is in place before removing the previous set guard or
-		# reading mutable UU state, so failed updates never grab game TCP.
-		while iptables -t nat -D SHADOWSOCKS -p tcp -m mac --mac-source "$uu_mac" \
-			-m set --match-set "$set_name" dst -j RETURN >/dev/null 2>&1; do :; done
+		set_position=$(ss_routing_uu_set_position "$uu_mac" "$set_name")
+		valid_guard=0
+		# The kernel keeps an ipset alive while this exact rule references it.
+		if [ -n "$set_position" ] && [ "$set_position" -lt "$goto_position" ]; then
+			valid_guard=1
+			# Keep the active set/rule throughout discovery and atomic swap.
+			while iptables -t nat -D SHADOWSOCKS -p tcp -m mac --mac-source "$uu_mac" -j RETURN >/dev/null 2>&1; do :; done
+		else
+			guard_position=$(ss_routing_uu_main_position "$uu_mac" RETURN)
+			if [ -z "$guard_position" ] || [ "$guard_position" -ge "$goto_position" ]; then
+				iptables -t nat -I SHADOWSOCKS "$goto_position" -p tcp -m mac --mac-source "$uu_mac" -j RETURN || return 1
+			fi
+			while iptables -t nat -D SHADOWSOCKS -p tcp -m mac --mac-source "$uu_mac" \
+				-m set --match-set "$set_name" dst -j RETURN >/dev/null 2>&1; do :; done
+		fi
 		[ ! -L "$state" ] && (umask 077; mkdir -p "$state") && chmod 700 "$state" || continue
 		rules_file="$state/rules.$$"
 		routes_file="$state/routes.$$"
@@ -183,6 +241,10 @@ ss_routing_update_uu_tcp_bypasses() {
 			# through the existing MAC CHN route, rather than bypassing all TCP.
 			while iptables -t nat -D SHADOWSOCKS -p tcp -m mac --mac-source "$uu_mac" \
 				-j RETURN >/dev/null 2>&1; do :; done
+			while iptables -t nat -D SHADOWSOCKS -p tcp -m mac --mac-source "$uu_mac" \
+				-m set --match-set "$set_name" dst -j RETURN >/dev/null 2>&1; do :; done
+			ipset destroy "$set_name" >/dev/null 2>&1 || true
+			rm -f "$state/$set_name.cidrs"
 			rm -f "$rules_file" "$routes_file" "$cidrs_file" "$restore_file" "$prerouting_file"
 			continue
 		fi
@@ -200,7 +262,7 @@ ss_routing_update_uu_tcp_bypasses() {
 			ipset -! create "$set_name" hash:net family inet hashsize 1024 maxelem 65536 >/dev/null 2>&1 &&
 			ipset swap "$temp_set" "$set_name" >/dev/null 2>&1; then
 			guard_position=$(ss_routing_uu_main_position "$uu_mac" RETURN)
-			if [ -n "$guard_position" ]; then
+			if [ "$valid_guard" != 1 ] && [ -n "$guard_position" ]; then
 				iptables -t nat -R SHADOWSOCKS "$guard_position" -p tcp -m mac --mac-source "$uu_mac" \
 					-m set --match-set "$set_name" dst -j RETURN || return 1
 			fi
@@ -284,17 +346,63 @@ ss_routing_remove_uu_mac_jump() {
 		--mac-source "$1" -j SHADOWSOCKS >/dev/null 2>&1; do :; done
 }
 
+ss_routing_sync_uu_policy_routes() {
+	# Only edit exact MAC rules generated by this helper. The temporary RETURN
+	# guard remains in place until the UU destination set has been refreshed.
+	local uu_mac target_chain goto_position return_position old_chain set_name
+	target_chain=$(ss_routing_uu_target_chain) || return 1
+	for uu_mac in $SS_ROUTING_UU_MACS; do
+		goto_position=$(ss_routing_uu_main_position "$uu_mac" GOTO)
+		return_position=$(ss_routing_uu_main_position "$uu_mac" RETURN)
+		if [ "$target_chain" = RETURN ]; then
+			if [ -z "$return_position" ] || { [ -n "$goto_position" ] && [ "$return_position" -ge "$goto_position" ]; }; then
+				iptables -t nat -I SHADOWSOCKS "${goto_position:-1}" -p tcp -m mac \
+					--mac-source "$uu_mac" -j RETURN || return 1
+			fi
+			for old_chain in SHADOWSOCKS_CHN SHADOWSOCKS_GFW; do
+				while iptables -t nat -D SHADOWSOCKS -p tcp -m mac --mac-source "$uu_mac" \
+					-g "$old_chain" >/dev/null 2>&1; do :; done
+			done
+			set_name=$(ss_routing_uu_set_name "$uu_mac")
+			while iptables -t nat -D SHADOWSOCKS -p tcp -m mac --mac-source "$uu_mac" \
+				-m set --match-set "$set_name" dst -j RETURN >/dev/null 2>&1; do :; done
+			ss_routing_remove_uu_mac_jump "$uu_mac"
+		elif [ -n "$goto_position" ]; then
+			iptables -t nat -R SHADOWSOCKS "$goto_position" -p tcp -m mac \
+				--mac-source "$uu_mac" -g "$target_chain" || return 1
+			for old_chain in SHADOWSOCKS_CHN SHADOWSOCKS_GFW; do
+				[ "$old_chain" != "$target_chain" ] || continue
+				while iptables -t nat -D SHADOWSOCKS -p tcp -m mac --mac-source "$uu_mac" \
+					-g "$old_chain" >/dev/null 2>&1; do :; done
+			done
+		elif [ -n "$return_position" ]; then
+			# Switching from the direct profile: keep its RETURN until set refresh.
+			iptables -t nat -I SHADOWSOCKS "$((return_position+1))" -p tcp -m mac \
+				--mac-source "$uu_mac" -g "$target_chain" || return 1
+		fi
+	done
+}
+
 ss_routing_reconcile_uu() {
 	# UU puts terminal per-device RETURN rules after its own DNATs. A global
 	# appended jump cannot reach those devices. Locate their current IPv4 only
 	# to identify that exact RETURN; the inserted exception remains MAC based.
-	local uu_mac uu_ip return_position found_position current_positions old_mac
+	local uu_mac uu_ip return_position found_position current_positions old_mac target_chain
+	target_chain=$(ss_routing_uu_target_chain) || return 1
+	ss_routing_sync_uu_policy_routes || return 1
+	if [ "$target_chain" = RETURN ]; then
+		for old_mac in $(ss_routing_uu_jumps | awk '{print $2}' | ss_routing_normalize_macs); do
+			ss_routing_remove_uu_mac_jump "$old_mac"
+		done
+		ss_routing_clear_uu_sets
+		return 0
+	fi
 	ss_routing_update_uu_tcp_bypasses || return 1
 	for old_mac in $(ss_routing_uu_jumps | awk '{print $2}' | ss_routing_normalize_macs); do
 		printf '%s\n' "$SS_ROUTING_UU_MACS" | grep -Fqx "$old_mac" || ss_routing_remove_uu_mac_jump "$old_mac"
 	done
 	for uu_mac in $SS_ROUTING_UU_MACS; do
-		if [ -z "$(ss_routing_uu_main_position "$uu_mac" SHADOWSOCKS_CHN)" ]; then
+		if [ -z "$(ss_routing_uu_main_position "$uu_mac" "$target_chain")" ]; then
 			# A newly saved profile may precede its service restart. Do not
 			# bypass UU's terminal RETURN until this MAC has its owned route.
 			ss_routing_remove_uu_mac_jump "$uu_mac"
@@ -373,12 +481,112 @@ ss_routing_remove_dns_rules() {
 	done
 }
 
-if [ "${1:-}" = reconcile-uu ]; then
+ss_routing_watch_allowed() {
+	[ "$(dbus get ss_basic_enable 6>&- 7>&- 8>&- 9>&-)" = 1 ] || return 1
+	case "$(cat /tmp/ss_failover/mode 2>/dev/null 6>&- 7>&- 8>&- 9>&-)" in proxy|'') return 0 ;; *) return 1 ;; esac
+}
+
+ss_routing_watch_snapshot() {
+	local rules mac address selected tables table
+	rules=$(ip rule show 2>/dev/null) || return 1
+	printf 'profiles:%s|%s|%s\n%s\n' "$SS_ROUTING_UU_TCP_POLICY" "$SS_ROUTING_UU_MACS" "$SS_ROUTING_BYPASS_MACS" "$rules"
+	iptables -t nat -S PREROUTING 2>/dev/null || return 1
+	iptables -t mangle -S PREROUTING 2>/dev/null || return 1
+	iptables -t nat -S SHADOWSOCKS 2>/dev/null || return 1
+	tables=
+	for mac in $SS_ROUTING_UU_MACS; do
+		for address in $(ss_routing_uu_ipv4_for_mac "$mac"); do
+			printf 'mapping:%s:%s\n' "$mac" "$address"
+			selected=$(printf '%s\n' "$rules" | ss_routing_uu_policy_tables "$address") || selected=
+			tables="$tables $selected"
+		done
+	done
+	for table in $(printf '%s\n' "$tables" | tr ' ' '\n' | awk 'NF && !seen[$0]++'); do
+		printf 'table:%s\n' "$table"
+		ip route show table "$table" 2>/dev/null || return 1
+	done
+}
+
+ss_routing_watch_digest() {
+	local snapshot
+	snapshot=$(ss_routing_watch_snapshot) || return 1
+	printf '%s\n' "$snapshot" | md5sum | awk '{print $1}'
+}
+
+ss_routing_watch_finish() {
+	local rc=$?
+	trap - EXIT HUP INT TERM
+	if [ "${SS_ROUTING_WATCH_CORE_LOCKED:-0}" = 1 ]; then "$SS_ROUTING_WATCH_FLOCK" -u 7 >/dev/null 2>&1; fi
+	exec 7>&-
+	if [ "${SS_ROUTING_WATCH_LOCKED:-0}" = 1 ]; then
+		rm -f "$SS_ROUTING_WATCH_DIR/pid"
+		"$SS_ROUTING_WATCH_FLOCK" -u 6 >/dev/null 2>&1
+	fi
+	exec 6>&-
+	exit "$rc"
+}
+
+ss_routing_watch() {
+	local digest previous= state
+	umask 077
+	SS_ROUTING_WATCH_FLOCK=${SS_ROUTING_WATCH_FLOCK:-/koolshare/bin/ss-flock}
+	SS_ROUTING_WATCH_DIR=${SS_ROUTING_WATCH_STATE:-/tmp/ss_uu_watch}
+	SS_ROUTING_WATCH_LOCKED=0
+	SS_ROUTING_WATCH_CORE_LOCKED=0
+	# Never retain locks inherited from a service/controller launcher.
+	exec 7>&- 8>&- 9>&-
+	ss_routing_watch_allowed || return 0
+	[ ! -L "$SS_ROUTING_WATCH_DIR" ] && mkdir -p "$SS_ROUTING_WATCH_DIR" && chmod 700 "$SS_ROUTING_WATCH_DIR" || return 1
+	for state in lock pid digest; do [ ! -L "$SS_ROUTING_WATCH_DIR/$state" ] || return 1; done
+	exec 6>"$SS_ROUTING_WATCH_DIR/lock"
+	"$SS_ROUTING_WATCH_FLOCK" -n 6 || { exec 6>&-; return 0; }
+	SS_ROUTING_WATCH_LOCKED=1
+	trap ss_routing_watch_finish EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	printf '%s\n' "$$" > "$SS_ROUTING_WATCH_DIR/pid"
+	while ss_routing_watch_allowed; do
+		ss_routing_load_bypass_macs || return 1
+		[ -n "$SS_ROUTING_UU_MACS" ] || return 0
+		exec 7>/var/lock/koolss.lock
+		if "$SS_ROUTING_WATCH_FLOCK" -n 7; then
+			SS_ROUTING_WATCH_CORE_LOCKED=1
+			if ss_routing_watch_allowed && ss_routing_load_bypass_macs && [ -n "$SS_ROUTING_UU_MACS" ]; then
+				if digest=$(trap - EXIT HUP INT TERM; ss_routing_watch_digest 6>&- 7>&- 8>&- 9>&-) && [ "$digest" != "$previous" ]; then
+					if (trap - EXIT HUP INT TERM; exec 6>&- 7>&- 8>&- 9>&-; ss_routing_reconcile_uu); then
+						# A UU firewall rebuild may also move/remove the optional
+						# DNS filter hook. Repair only its owned chain, under this
+						# service lock; failure leaves normal DNS available.
+						if [ -x /koolshare/scripts/ss_adblock.sh ] && [ "$(dbus get ss_basic_adblock_enable 6>&- 7>&- 8>&- 9>&-)" = 1 ]; then
+							sh /koolshare/scripts/ss_adblock.sh reconcile 5>&- 6>&- 7>&- 8>&- 9>&- >/dev/null 2>&1 || :
+						fi
+						# Keep the pre-reconcile digest: a concurrent UU rebuild
+						# must still trigger the following pass. Our own entry
+						# repair may cause one additional pass, then settles.
+						previous=$digest
+						printf '%s\n' "$digest" > "$SS_ROUTING_WATCH_DIR/digest"
+					fi
+				fi
+			fi
+			"$SS_ROUTING_WATCH_FLOCK" -u 7
+			SS_ROUTING_WATCH_CORE_LOCKED=0
+		fi
+		exec 7>&-
+		sleep "$SS_ROUTING_UU_INTERVAL" 6>&- 7>&- 8>&- 9>&-
+	done
+}
+
+if [ "${1:-}" = reconcile-uu ] || [ "${1:-}" = watch-uu ]; then
 	PATH=/koolshare/bin:/usr/sbin:/usr/bin:/sbin:/bin
 	export PATH
+	if [ "$1" = watch-uu ]; then ss_routing_watch; exit $?; fi
 	[ "$(dbus get ss_basic_enable)" = 1 ] || exit 0
 	exec 7>/var/lock/koolss.lock
 	/koolshare/bin/ss-flock -n 7 || exit 0
+	trap '/koolshare/bin/ss-flock -u 7 >/dev/null 2>&1; exec 7>&-' EXIT
+	[ "$(dbus get ss_basic_enable)" = 1 ] || exit 0
+	case "$(cat /tmp/ss_failover/mode 2>/dev/null)" in direct|error) exit 0 ;; esac
 	iptables -t nat -S SHADOWSOCKS >/dev/null 2>&1 || exit 0
 	ss_routing_load_bypass_macs || exit 1
 	ss_routing_reconcile_uu

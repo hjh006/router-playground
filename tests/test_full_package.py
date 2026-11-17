@@ -30,7 +30,7 @@ class FullPackageTests(unittest.TestCase):
         paths += [root / 'shadowsocks' / name for name in incremental.FILES
                   if not name.startswith('bin/') and name != 'scripts/uninstall_shadowsocks.sh']
         paths += [work / 'r7000-client/dist' / name for name in
-                  ('anytls-client-linux-armv5-r7000.3', 'ss-flock-linux-armv5')]
+                  ('anytls-client-linux-armv5-r7000.3', 'ss-flock-linux-armv5', 'ss-https-probe-linux-armv5')]
         for path in paths:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b'public-test-payload\n')
@@ -69,17 +69,21 @@ class FullPackageTests(unittest.TestCase):
                 self.assertIn('shadowsocks/update/install.sh', files)
                 self.assertIn('shadowsocks/files/ss/version', files)
                 self.assertIn('shadowsocks/files/scripts/uninstall_shadowsocks.sh', files)
+                self.assertIn('shadowsocks/files/bin/ss-https-probe',files)
+                self.assertIn('shadowsocks/files/scripts/ss_failover.sh',files)
+                self.assertIn('shadowsocks/files/scripts/ss_adblock.sh',files)
                 self.assertNotIn('shadowsocks/files/ss/postscripts/change_my_name.sh', files)
                 for data in files.values():
                     for secret in (b'PRIVATE-DEVICE-STATE', b'OLD-DESTRUCTIVE-INSTALLER', b'OLD-ONLINE-UPDATER'):
                         self.assertNotIn(secret, data)
                 meta = json.loads(files['shadowsocks/BUILD.json'])
+                self.assertEqual(meta['build'],'4.38.3-r7000.5-full.1')
                 self.assertFalse(meta['personal_settings_included'])
                 self.assertFalse(meta['fresh_install_starts_proxy'])
                 self.assertIn(str(meta['fresh_file_count']).encode(), files['shadowsocks/install.sh'])
                 self.assertNotIn(b'@@FULL_FILE_COUNT@@', files['shadowsocks/install.sh'])
                 update_manifest = files['shadowsocks/update/manifest.md5'].decode().splitlines()
-                self.assertEqual(len(update_manifest), 17)
+                self.assertEqual(len(update_manifest), 20)
                 for line in update_manifest:
                     name = line.split()[1]
                     self.assertEqual(files['shadowsocks/files/' + name], files['shadowsocks/update/payload/' + name])

@@ -12,7 +12,7 @@ export PATH
 fail() { printf 'Enhancement: %s\n' "$1" >&2; exit 1; }
 allowed_path() {
   case "$1" in
-    bin/anytls|bin/ss-flock|scripts/ss_anytls.sh|scripts/ss_health.sh|scripts/ss_routing.sh|scripts/ss_dns_hooks.sh|scripts/ss_webtest.sh|scripts/uninstall_shadowsocks.sh|ss/ssconfig.sh|ss/cru/foreign.sh|ss/rules/dnsmasq.postconf|ss/rules/cacert.pem|ss/rules/cacert.pem.sha256|webs/Main_Ss_Content.asp|res/ss-health.js|res/ss-health.css|res/icon-shadowsocks.png) return 0 ;;
+    bin/anytls|bin/ss-flock|bin/ss-https-probe|scripts/ss_anytls.sh|scripts/ss_health.sh|scripts/ss_failover.sh|scripts/ss_adblock.sh|scripts/ss_routing.sh|scripts/ss_dns_hooks.sh|scripts/ss_webtest.sh|scripts/uninstall_shadowsocks.sh|ss/ssconfig.sh|ss/cru/foreign.sh|ss/rules/dnsmasq.postconf|ss/rules/cacert.pem|ss/rules/cacert.pem.sha256|webs/Main_Ss_Content.asp|res/ss-health.js|res/ss-health.css|res/icon-shadowsocks.png) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -22,7 +22,7 @@ file_mode() { "$RUNTIME_TOOL" mode "$1"; }
 dbus_exists() { dbus list "$1" | awk -F= -v key="$1" '$1 == key {found=1} END {exit !found}'; }
 allowed_key() {
   case "$1" in
-    ss_basic_bypass_macs|ss_basic_uu_macs|ss_basic_anytls_min_idle|ss_basic_anytls_idle_check|ss_basic_anytls_idle_timeout|ss_basic_anytls_handshake|ss_basic_anytls_alpn|ss_basic_anytls_fingerprint|ss_basic_anytls_hosts|ss_basic_rule_update|ss_basic_node_update|ss_basic_server_resolver|ss_basic_health_interval|ss_basic_health_timeout|ss_basic_health_failures|ss_basic_allowinsecure|ss_basic_enable) return 0 ;;
+    ss_basic_adblock_enable|ss_basic_adblock_domains|ss_basic_adblock_allow|ss_basic_bypass_macs|ss_basic_uu_macs|ss_basic_uu_tcp_policy|ss_basic_uu_interval|ss_basic_failover_enable|ss_basic_failover_country|ss_basic_failover_nodes|ss_basic_failover_countries|ss_basic_failover_failures|ss_basic_failover_recoveries|ss_basic_failover_cooldown|ss_basic_failover_timeout|ss_basic_failover_budget|ss_basic_failover_direct|ss_basic_anytls_min_idle|ss_basic_anytls_idle_check|ss_basic_anytls_idle_timeout|ss_basic_anytls_handshake|ss_basic_anytls_alpn|ss_basic_anytls_fingerprint|ss_basic_anytls_hosts|ss_basic_rule_update|ss_basic_node_update|ss_basic_server_resolver|ss_basic_server_resolver_user|ss_basic_health_interval|ss_basic_health_timeout|ss_basic_health_failures|ss_basic_allowinsecure|ss_basic_enable) return 0 ;;
     ssconf_basic_allowinsecure_*)
       node_suffix=${1#ssconf_basic_allowinsecure_}
       case "$node_suffix" in ''|*[!0-9]*) return 1 ;; esac
@@ -105,7 +105,7 @@ RUNTIME_TOOL="$PAYLOAD/bin/ss-flock"
 KS_ROOT=$(CDPATH= cd -P "$KS_ROOT" && pwd) || fail 'Cannot resolve the installed root directory.'
 [ -f "$KS_ROOT/ss/version" ] && [ "$(cat "$KS_ROOT/ss/version")" = 4.38.3 ] || fail 'An installed fancyss 4.38.3 is required.'
 [ -d "$PAYLOAD" ] && [ ! -L "$PAYLOAD" ] && [ -f "$PACKAGE/manifest.md5" ] && [ ! -L "$PACKAGE/manifest.md5" ] || fail 'Payload or manifest is missing.'
-awk 'NF != 2 || length($1) != 32 || $1 !~ /^[0-9a-fA-F]+$/ || $2 !~ /^[A-Za-z0-9._\/-]+$/ || $2 ~ /(^|\/)\.\.?($|\/)/ || $2 ~ /\/\// || $2 ~ /^\// {exit 1} {if (seen[$2]++) exit 1; count++} END {if (count != 17) exit 1}' "$PACKAGE/manifest.md5" || fail 'Manifest format or file count is invalid.'
+awk 'NF != 2 || length($1) != 32 || $1 !~ /^[0-9a-fA-F]+$/ || $2 !~ /^[A-Za-z0-9._\/-]+$/ || $2 ~ /(^|\/)\.\.?($|\/)/ || $2 ~ /\/\// || $2 ~ /^\// {exit 1} {if (seen[$2]++) exit 1; count++} END {if (count != 20) exit 1}' "$PACKAGE/manifest.md5" || fail 'Manifest format or file count is invalid.'
 
 WORK=$(mktemp -d "$RUN_ROOT/r7000-enhancement.XXXXXX") || fail 'Cannot allocate private work directory.'
 LOCK="$RUN_ROOT/r7000-enhancement.lock"
@@ -174,11 +174,12 @@ while IFS= read -r relative; do
 done < "$WORK/paths"
 (cd "$PAYLOAD" && md5sum -c "$PACKAGE/manifest.md5") > "$WORK/checksums.log" 2>&1 || fail 'Payload checksum verification failed.'
 sh -n "$PAYLOAD/ss/ssconfig.sh" || fail 'The new service script has invalid shell syntax.'
-for relative in scripts/ss_anytls.sh scripts/ss_health.sh scripts/ss_routing.sh scripts/ss_dns_hooks.sh scripts/ss_webtest.sh scripts/uninstall_shadowsocks.sh ss/cru/foreign.sh ss/rules/dnsmasq.postconf; do
+for relative in scripts/ss_anytls.sh scripts/ss_health.sh scripts/ss_failover.sh scripts/ss_adblock.sh scripts/ss_routing.sh scripts/ss_dns_hooks.sh scripts/ss_webtest.sh scripts/uninstall_shadowsocks.sh ss/cru/foreign.sh ss/rules/dnsmasq.postconf; do
   sh -n "$PAYLOAD/$relative" || fail 'A payload script has invalid shell syntax.'
 done
 "$PAYLOAD/bin/anytls" -version > "$WORK/client-version" 2>&1 || fail 'The AnyTLS client cannot run on this router.'
 grep -q -- '-r7000\.' "$WORK/client-version" || fail 'The AnyTLS client is not the enhanced R7000 build.'
+"$PAYLOAD/bin/ss-https-probe" -h > "$WORK/probe-help" 2>&1 || fail 'The HTTPS probe cannot run on this router.'
 # Health and service locking require locks on inherited descriptors to remain
 # held after the helper exits, then release explicitly. Filename-only tests do
 # not establish that contract.
@@ -192,8 +193,23 @@ grep -q -- '-r7000\.' "$WORK/client-version" || fail 'The AnyTLS client is not t
 
 mkdir "$WORK/desired"
 cat > "$WORK/defaults" <<'DEFAULTS'
+ss_basic_adblock_enable=0
+ss_basic_adblock_domains=
+ss_basic_adblock_allow=
 ss_basic_bypass_macs=
 ss_basic_uu_macs=
+ss_basic_uu_tcp_policy=gfwlist
+ss_basic_uu_interval=5
+ss_basic_failover_enable=0
+ss_basic_failover_country=auto
+ss_basic_failover_nodes=
+ss_basic_failover_countries=
+ss_basic_failover_failures=3
+ss_basic_failover_recoveries=2
+ss_basic_failover_cooldown=120
+ss_basic_failover_timeout=5
+ss_basic_failover_budget=60
+ss_basic_failover_direct=1
 ss_basic_anytls_min_idle=0
 ss_basic_anytls_idle_check=30
 ss_basic_anytls_idle_timeout=30
@@ -201,6 +217,7 @@ ss_basic_anytls_handshake=8
 ss_basic_anytls_alpn=h2
 ss_basic_anytls_fingerprint=chrome
 ss_basic_anytls_hosts=
+ss_basic_server_resolver_user=
 ss_basic_health_interval=30
 ss_basic_health_timeout=10
 ss_basic_health_failures=3
@@ -210,10 +227,14 @@ while IFS='=' read -r key value; do
   [ -z "$existing" ] || value=$existing
   printf '%s' "$value" > "$WORK/desired/$key"
 done < "$WORK/defaults"
+# Existing automatic-update choices are preserved; a new/empty flag starts off.
+for key in ss_basic_rule_update ss_basic_node_update; do
+  [ -n "$(dbus get "$key")" ] || printf '0' > "$WORK/desired/$key"
+done
 if [ -n "$SETTINGS" ]; then
   [ -f "$SETTINGS" ] && [ ! -L "$SETTINGS" ] || fail 'The settings file must be a regular private file.'
   case "$(file_mode "$SETTINGS")" in 400|600) ;; *) fail 'The settings file must have mode 600 or 400.' ;; esac
-  [ "$(wc -c < "$SETTINGS")" -le 8192 ] || fail 'The settings file is too large.'
+  [ "$(wc -c < "$SETTINGS")" -le 32768 ] || fail 'The settings file is too large.'
   : > "$WORK/private.keys"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|\#*) continue ;; *=*) key=${line%%=*}; value=${line#*=} ;; *) fail 'Invalid settings line.' ;; esac
@@ -226,14 +247,28 @@ if [ -n "$SETTINGS" ]; then
 fi
 normalized_hosts=$(SS_ANYTLS_KOOLSHARE="$PAYLOAD" sh "$PAYLOAD/scripts/ss_anytls.sh" normalize-hosts "$(cat "$WORK/desired/ss_basic_anytls_hosts")") || fail 'The AnyTLS hosts setting is invalid.'
 printf '%s' "$normalized_hosts" > "$WORK/desired/ss_basic_anytls_hosts"
-# These two options are changed only when explicitly supplied privately.
+# Existing nonempty update choices are changed only when supplied privately.
 for key in ss_basic_rule_update ss_basic_node_update; do
   if [ -f "$WORK/desired/$key" ]; then
     case "$(cat "$WORK/desired/$key")" in 0|1) ;; *) fail 'An automatic update flag is invalid.' ;; esac
   fi
 done
+resolver_preset=$(dbus get ss_basic_server_resolver)
 if [ -f "$WORK/desired/ss_basic_server_resolver" ]; then
-  case "$(cat "$WORK/desired/ss_basic_server_resolver")" in 1|2|3|4|5|6|7|8|9|10|11|12|13) ;; *) fail 'The server resolver preset is invalid.' ;; esac
+  resolver_preset=$(cat "$WORK/desired/ss_basic_server_resolver")
+  case "$resolver_preset" in 1|2|3|4|5|6|7|8|9|10|11|12|13) ;; *) fail 'The server resolver preset is invalid.' ;; esac
+fi
+resolver_custom=$(cat "$WORK/desired/ss_basic_server_resolver_user")
+if [ -n "$resolver_custom" ]; then
+  # This helper contains definitions/constants only. Its endpoint parser is pure
+  # and accepts an IPv4 literal plus an optional UDP port, without DNS or eval.
+  normalized_resolver=$(
+    . "$PAYLOAD/scripts/ss_dns_hooks.sh"
+    ss_dns_normalize_resolver "$resolver_custom"
+  ) || fail 'The custom server resolver endpoint is invalid.'
+  printf '%s' "$normalized_resolver" > "$WORK/desired/ss_basic_server_resolver_user"
+elif [ "$resolver_preset" = 12 ]; then
+  fail 'Custom server resolver preset 12 requires an IPv4 endpoint.'
 fi
 . "$PAYLOAD/scripts/ss_routing.sh"
 # Validate the existing profiles too, since the safe pre-update stop reads them.
@@ -261,6 +296,25 @@ case "$(cat "$WORK/desired/ss_basic_anytls_fingerprint")" in chrome|standard) ;;
 case "$(cat "$WORK/desired/ss_basic_health_interval")" in 30|60|120) ;; *) fail 'The health interval is invalid.' ;; esac
 case "$(cat "$WORK/desired/ss_basic_health_timeout")" in 6|8|10) ;; *) fail 'The health timeout is invalid.' ;; esac
 validate_number ss_basic_health_failures 1 5
+validate_number ss_basic_uu_interval 2 30
+case "$(cat "$WORK/desired/ss_basic_uu_tcp_policy")" in gfwlist|foreign|direct) ;; *) fail 'The UU TCP policy is invalid.' ;; esac
+# Reuse the controller's pure validator against proposed values before mutation.
+# A subshell confines its PATH/globals/exit; dbus reads only the desired files.
+(
+  trap - 0 HUP INT TERM
+  dbus() { [ "${1:-}" = get ] && [ -f "$WORK/desired/${2:-}" ] && cat "$WORK/desired/$2"; }
+  set -- validate
+  . "$PAYLOAD/scripts/ss_failover.sh"
+) || fail 'The failover settings are invalid.'
+# Validate optional DNS filtering even while it is disabled. Only proposed
+# encoded settings are read; validation must not create a process or hook.
+(
+  trap - 0 HUP INT TERM
+  dbus() { [ "${1:-}" = get ] && [ -f "$WORK/desired/${2:-}" ] && cat "$WORK/desired/$2"; }
+  SS_ADBLOCK_LIBRARY=0
+  set -- validate
+  . "$PAYLOAD/scripts/ss_adblock.sh"
+) || fail 'The ad-domain settings are invalid.'
 if [ -f "$WORK/desired/ss_basic_allowinsecure" ]; then
   case "$(cat "$WORK/desired/ss_basic_allowinsecure")" in 0|1) ;; *) fail 'The TLS migration flag is invalid.' ;; esac
   node=$(dbus get ssconf_basic_node)
@@ -386,7 +440,7 @@ while IFS= read -r relative; do stage_one "$relative"; done < "$WORK/paths"
 MUTATED=1
 # Install every dependency before the new safe service entry point; never call
 # the original stop, whose global OUTPUT flush would erase UU routing rules.
-for relative in bin/ss-flock scripts/ss_routing.sh scripts/ss_dns_hooks.sh scripts/ss_health.sh scripts/ss_anytls.sh ss/ssconfig.sh; do
+for relative in bin/ss-flock bin/ss-https-probe scripts/ss_routing.sh scripts/ss_dns_hooks.sh scripts/ss_health.sh scripts/ss_anytls.sh scripts/ss_failover.sh scripts/ss_adblock.sh ss/ssconfig.sh; do
   commit_one "$relative"
 done
 if [ "$original_enabled" = 1 ]; then
@@ -403,14 +457,38 @@ if [ "$original_enabled" = 1 ]; then
   sh "$KS_ROOT/ss/ssconfig.sh" start >> "$BACKUP/service.log" 2>&1 || fail 'The enhanced start failed.'
   [ "$(dbus get ss_basic_enable)" = 1 ] || fail 'The service disabled itself during startup.'
   if [ "$(dbus get ss_basic_type)" = 4 ] && [ "$(dbus get ss_basic_trojan_binary)" = AnyTLS ]; then
-    ready=0
-    attempt=0
-    while [ "$attempt" -lt 5 ]; do
-      if pidof anytls >/dev/null 2>&1 && netstat -lnt 2>/dev/null | awk '$1 ~ /^tcp/ && $6 == "LISTEN" {if ($4 ~ /:23456$/) socks=1; if ($4 ~ /:3333$/) nat=1} END {exit !(socks && nat)}'; then ready=1; break; fi
-      attempt=$((attempt+1))
-      sleep 1
-    done
-    [ "$ready" = 1 ] || fail 'AnyTLS process or SOCKS/NAT listeners did not become ready.'
+    runtime_mode=
+    failover_state="$RUN_ROOT/ss_failover"
+    if [ "$(dbus get ss_basic_failover_enable)" = 1 ] &&
+       { [ -e "$failover_state/mode" ] || [ -L "$failover_state/mode" ] || [ -L "$failover_state" ]; }; then
+      [ -d "$failover_state" ] && [ ! -L "$failover_state" ] &&
+        [ "$(file_mode "$failover_state")" = 700 ] &&
+        [ -f "$failover_state/mode" ] && [ ! -L "$failover_state/mode" ] &&
+        [ "$(file_mode "$failover_state/mode")" = 600 ] || fail 'The failover runtime state is not private or complete.'
+      runtime_mode=$(cat "$failover_state/mode")
+      case "$runtime_mode" in proxy|direct) ;; error) fail 'The protected network path did not become ready.' ;; *) fail 'The failover runtime mode is invalid.' ;; esac
+    fi
+    if [ "$runtime_mode" = direct ]; then
+      # The service writes this private marker only after its owned proxy/DNS
+      # hooks were withdrawn successfully. Direct intentionally has no listener;
+      # require its recovery watchdog rather than sourcing the state controller.
+      watchdog=$(cru l 2>/dev/null) || fail 'Cannot verify the failover recovery watchdog.'
+      printf '%s\n' "$watchdog" | awk '
+        $1=="*" && $2=="*" && $3=="*" && $4=="*" && $5=="*" &&
+        $6=="/bin/sh" && $7=="/koolshare/scripts/ss_failover.sh" && $8=="tick" &&
+        $9==">/dev/null" && $10=="2>&1" && (NF==10 || (NF==11 && $11=="#ss_failover#")) {n++}
+        END {exit !(n==1)}' || fail 'The protected direct path has no unique failover recovery watchdog.'
+      printf 'Protected direct path preserved; recovery watchdog verified.\n'
+    else
+      ready=0
+      attempt=0
+      while [ "$attempt" -lt 5 ]; do
+        if pidof anytls >/dev/null 2>&1 && netstat -lnt 2>/dev/null | awk '$1 ~ /^tcp/ && $6 == "LISTEN" {if ($4 ~ /:23456$/) socks=1; if ($4 ~ /:3333$/) nat=1} END {exit !(socks && nat)}'; then ready=1; break; fi
+        attempt=$((attempt+1))
+        sleep 1
+      done
+      [ "$ready" = 1 ] || fail 'AnyTLS process or SOCKS/NAT listeners did not become ready.'
+    fi
   fi
 fi
 COMMITTED=1

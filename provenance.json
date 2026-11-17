@@ -20,7 +20,7 @@
     "GOARM": "5"
   },
   "patch_sha256": {
-    "fancyss-4.38.3.patch": "5cf126cf52a9c3f29622078fdc5df645aeb381fe432746133726521dd6fbd6d1",
+    "fancyss-4.38.3.patch": "a5e32e2f80ee1b0a4c8d9ca02fe9b77318e5ce282b583edf7b643dddb019c91e",
     "anytls-r7000.3.patch": "7495d430b1c322404ff9f7f456cd1925a25f6f314bfa23dbfcaec790e9056663"
   },
   "third_party_ca": {
@@ -48,5 +48,6 @@
     "archive_metadata_normalized": true,
     "fresh_install_validation": "16 sandbox cases + actual 95-file tree integration with host-only ARM preflight shims; independent review",
     "blank_hardware_fresh_install_verified": false
-  }
+  },
+  "development_version": "4.38.3-r7000.5"
 }

@@ -83,6 +83,10 @@ class FullInstallerTests(unittest.TestCase):
             p=self.pkg/'files'/name;p.parent.mkdir(parents=True,exist_ok=True)
             if name=='bin/anytls':p.write_text('#!/bin/sh\necho anytls/0.0.13-r7000.3\n')
             elif name=='bin/ss-flock':p.write_text('#!'+sys.executable+'\n'+helpers.FLOCK)
+            elif name=='bin/ss-https-probe':p.write_text(helpers.PROBE)
+            elif name in ['scripts/ss_failover.sh','scripts/ss_adblock.sh']:shutil.copyfile(ROOT/'plugin/overlay/shadowsocks'/name,p)
+            elif name=='scripts/ss_dns_hooks.sh':shutil.copyfile(ROOT/'plugin/overlay/shadowsocks/scripts/ss_dns_hooks.sh',p)
+            elif name=='scripts/ss_routing.sh':shutil.copyfile(ROOT/'plugin/overlay/shadowsocks/scripts/ss_routing.sh',p)
             elif name=='ss/version':p.write_text('4.38.3\n')
             elif name.endswith('.sh') or name.endswith('postconf'):
                 p.write_text('#!/bin/sh\necho forbidden-service >> "$MO_ROOT/events"\nexit 99\n')
@@ -133,14 +137,41 @@ class FullInstallerTests(unittest.TestCase):
         out=self.install();self.assertEqual(out.returncode,0,out.stderr)
         self.assertIn('Full installation completed (proxy disabled)',out.stdout)
         d=self.state();self.assertEqual(d['ss_basic_enable'],'0');self.assertEqual(d['softcenter_module_shadowsocks_install'],'4')
-        for key in ['ss_basic_bypass_macs','ss_basic_uu_macs','ss_basic_anytls_hosts']:self.assertEqual(d[key],'')
-        for key in ['ss_basic_rule_update','ss_basic_node_update','ss_basic_allowinsecure']:self.assertEqual(d[key],'0')
+        for key in ['ss_basic_bypass_macs','ss_basic_uu_macs','ss_basic_anytls_hosts','ss_basic_failover_nodes','ss_basic_failover_countries','ss_basic_server_resolver_user']:self.assertEqual(d[key],'')
+        for key in ['ss_basic_rule_update','ss_basic_node_update','ss_basic_allowinsecure','ss_basic_failover_enable']:self.assertEqual(d[key],'0')
+        self.assertEqual(d['ss_basic_uu_tcp_policy'],'gfwlist')
+        self.assertEqual(d['ss_basic_uu_interval'],'5')
+        self.assertEqual(d['ss_basic_adblock_enable'],'0')
+        self.assertEqual(d['ss_basic_adblock_domains'],'')
+        self.assertEqual(d['ss_basic_adblock_allow'],'')
+        self.assertEqual(d['ss_basic_failover_country'],'auto')
+        self.assertEqual(d['ss_basic_failover_direct'],'1')
+        self.assertEqual(d['ss_basic_failover_budget'],'60')
         self.assertFalse(any(k.startswith('ssconf_basic_') for k in d))
         self.assertNotIn('ss_basic_server',d);self.assertNotIn('ss_basic_password',d)
         self.assertEqual(os.readlink(self.ks/'bin/base64'),'shared-base64')
         self.assertEqual(os.readlink(self.ks/'bin/rss-tunnel'),'rss-local')
         self.assertEqual(os.readlink(self.ks/'init.d/S99socks5.sh'),'../scripts/ss_socks5.sh')
         self.assertFalse((self.ks/'scripts/ss_install.sh').exists())
+    def test_probe_must_run_before_any_mutation(self):
+        out=self.install(MO_BAD_PROBE='1');self.assertNotEqual(out.returncode,0)
+        self.assertIn('HTTPS probe cannot run',out.stderr);self.assert_restored()
+    def test_missing_new_dependency_is_rejected_with_valid_adjusted_manifest(self):
+        global PATHS
+        for missing in ['bin/ss-https-probe','scripts/ss_failover.sh','scripts/ss_adblock.sh']:
+            with self.subTest(missing=missing):
+                original_paths=PATHS;PATHS=[p for p in PATHS if p!=missing]
+                content=(self.pkg/'files'/missing).read_bytes();mode=stat.S_IMODE((self.pkg/'files'/missing).stat().st_mode)
+                (self.pkg/'files'/missing).unlink()
+                self.installer.write_text(self.installer.read_text().replace('FULL_FILE_COUNT='+str(len(original_paths)),'FULL_FILE_COUNT='+str(len(PATHS))))
+                try:
+                    self.manifest();out=self.install();self.assertNotEqual(out.returncode,0)
+                    self.assertIn('required full payload file is missing',out.stderr);self.assert_restored()
+                finally:
+                    PATHS=original_paths
+                    (self.pkg/'files'/missing).write_bytes(content);(self.pkg/'files'/missing).chmod(mode)
+                    self.installer.write_text(self.installer.read_text().replace('FULL_FILE_COUNT='+str(len(PATHS)-1),'FULL_FILE_COUNT='+str(len(PATHS))))
+                    self.manifest()
     def test_copy_failure_does_not_change_installed_files_or_settings(self):
         out=self.install(MO_FAIL='cp:ss/ssconfig.sh');self.assertNotEqual(out.returncode,0);self.assert_restored()
     def test_mid_commit_failure_restores_shared_regular_and_symbolic_files(self):

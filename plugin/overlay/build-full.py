@@ -13,7 +13,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parent
 WORK = ROOT.parent
-VERSION = '4.38.3-r7000.3-full.1'
+VERSION = '4.38.3-r7000.5-full.1'
 NOTICE_FILES = ('LICENSE', 'THIRD_PARTY_NOTICES.md', 'MPL-2.0.txt', 'third-party-licenses.tar.gz')
 ROOTS = ('bin', 'scripts', 'ss', 'webs', 'res')
 OFFLINE_ONLY = '''#!/bin/sh

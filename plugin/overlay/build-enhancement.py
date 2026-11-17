@@ -11,9 +11,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 WORK = ROOT.parent
 FILES = [
-    'bin/anytls', 'bin/ss-flock',
-    'scripts/ss_anytls.sh', 'scripts/ss_health.sh',
-    'scripts/ss_routing.sh', 'scripts/ss_dns_hooks.sh',
+    'bin/anytls', 'bin/ss-flock', 'bin/ss-https-probe',
+    'scripts/ss_anytls.sh', 'scripts/ss_health.sh', 'scripts/ss_failover.sh',
+    'scripts/ss_routing.sh', 'scripts/ss_dns_hooks.sh', 'scripts/ss_adblock.sh',
     'scripts/ss_webtest.sh', 'scripts/uninstall_shadowsocks.sh',
     'ss/ssconfig.sh', 'ss/cru/foreign.sh',
     'ss/rules/dnsmasq.postconf', 'ss/rules/cacert.pem',
@@ -40,6 +40,7 @@ def build(private=False):
     binary_sources = {
         'bin/anytls': WORK/'r7000-client/dist/anytls-client-linux-armv5-r7000.3',
         'bin/ss-flock': WORK/'r7000-client/dist/ss-flock-linux-armv5',
+        'bin/ss-https-probe': WORK/'r7000-client/dist/ss-https-probe-linux-armv5',
         'scripts/uninstall_shadowsocks.sh': ROOT/'shadowsocks/uninstall.sh',
     }
     checksums = []
@@ -56,7 +57,7 @@ def build(private=False):
         sha[name] = hashlib.sha256(data).hexdigest()
     (package/'manifest.md5').write_text('\n'.join(checksums)+'\n')
     (package/'BUILD.json').write_text(json.dumps({
-        'build': '4.38.3-r7000.3',
+        'build': '4.38.3-r7000.5',
         'upstream': 'https://github.com/cary-sas/v2ray_bin',
         'base_release_sha256': '05a30314c8c6d8f33ae9c027b42927e9d17e6e648c75ac7b419282fe5c1c2adf',
         'files_sha256': sha,

@@ -4,21 +4,31 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1] / "shadowsocks"
 HELPER = ROOT / "scripts/ss_routing.sh"
-SOURCE = (ROOT / "ss/ssconfig.sh").read_text()
+SOURCE = (Path(os.environ.get("SS_ROUTING_SOURCE_ROOT", ROOT)) / "ss/ssconfig.sh").read_text()
 MACS = "02:00:00:00:00:01\n02:00:00:00:00:02"
 
 MOCK = r'''#!/usr/bin/env python3
-import json, os, pathlib, shlex, sys
+import fcntl, json, os, pathlib, shlex, sys
 p=pathlib.Path(os.environ['MOCK_STATE'])
 s=json.loads(p.read_text()); cmd=pathlib.Path(sys.argv[0]).name; a=sys.argv[1:]
 with open(os.environ['MOCK_LOG'],'a') as f:f.write(json.dumps([cmd]+a)+'\n')
 def finish(rc=0):p.write_text(json.dumps(s));sys.exit(rc)
 if cmd=='logger':finish()
-if cmd=='ss-flock':finish(1 if s.get('locked') else 0)
+if cmd=='ss-https-probe':
+ if '-resolve' not in a:finish(2)
+ if s.get('bootstrap_dns_fail'):finish(1)
+ for address in s.get('bootstrap_addresses',['203.0.113.7']):print(address)
+ finish()
+if cmd=='ss-flock':
+ if s.get('locked'):finish(1)
+ try:fcntl.flock(int(a[-1]),fcntl.LOCK_UN if '-u' in a else fcntl.LOCK_EX|(fcntl.LOCK_NB if '-n' in a else 0))
+ except BlockingIOError:finish(1)
+ finish()
 if cmd=='ipset':
  if s.get('ipset_unavailable'):finish(127)
  sets=s.setdefault('sets',{})
@@ -121,7 +131,7 @@ class RoutingTests(unittest.TestCase):
         self.bin.mkdir()
         (self.bin / "mock").write_text(MOCK)
         (self.bin / "mock").chmod(0o755)
-        for name in ["iptables", "dbus", "ifconfig", "nvram", "ip", "logger", "ss-flock", "ipset"]:
+        for name in ["iptables", "dbus", "ifconfig", "nvram", "ip", "logger", "ss-flock", "ipset", "ss-https-probe"]:
             (self.bin / name).symlink_to("mock")
         self.initial = {
             "tables": {k: {c: [] for c in ["OUTPUT", "PREROUTING", "FORWARD"]} for k in ["nat", "mangle", "filter"]},
@@ -139,46 +149,69 @@ class RoutingTests(unittest.TestCase):
 
     def shell(self, code, data=None):
         env = dict(os.environ, PATH=str(self.bin) + ":" + os.environ["PATH"], MOCK_STATE=str(self.state), MOCK_LOG=str(self.log), SS_ROUTING_UU_STATE=str(self.base / "uu-state"))
-        return subprocess.run(["/bin/bash", "-c", '. "$1"\n' + code, "routing-test", str(HELPER)], input=data, text=True, capture_output=True, env=env)
+        return subprocess.run(["/bin/bash", "-c", '. "$1"\n. "$2"\n' + code, "routing-test", str(HELPER), str(ROOT / 'scripts/ss_dns_hooks.sh')], input=data, text=True, capture_output=True, env=env)
 
     def commands(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
-    def test_anytls_bootstrap_maps_before_independent_dns_and_dials_resolved_ip(self):
+    def test_anytls_bootstrap_maps_before_custom_port_dns_and_dials_resolved_ip(self):
         mapper = self.base / "mapper.sh"
         mapper.write_text('test "$1" = map-host || exit 2\nprintf mapped.example.test\n')
         body = function("resolv_server_ip").replace("/koolshare/scripts/ss_anytls.sh", str(mapper))
+        body = body.replace("/koolshare/bin/ss-https-probe", str(self.bin / "ss-https-probe"))
         body = body.replace("/tmp/ss_host.conf", str(self.base / "ss_host.conf"))
-        for address_line in ("Address 1: 203.0.113.7", "Address: 2001:db8::7\nAddress: 203.0.113.7"):
-            with self.subTest(answer=address_line):
-                code = body + r'''
+        self.initial["bootstrap_addresses"] = ["203.0.113.7", "203.0.113.8"]
+        self.write_state(self.initial)
+        result = self.shell(body + r'''
 ss_basic_type=4; ss_basic_trojan_binary=AnyTLS; ss_basic_server=original.example.test
 echo_date() { :; }
-get_server_resolver() { printf 119.29.29.29; }
+get_server_resolver() { printf 192.0.2.53:7874; }
 close_in_five() { exit 17; }
-ss_dns_write_server_config() { printf '%s|%s\n' "$1" "$2"; }
-nslookup() { test "$1|$2" = 'mapped.example.test|119.29.29.29' || exit 18
-printf 'Server: resolver\nAddress: 119.29.29.29\n\nName: mapped.example.test\n%s\n' "$ANSWER"; }
+ss_dns_write_server_config() { echo unexpected-DNS-fragment; exit 18; }
+nslookup() { exit 18; }
 resolv_server_ip
 printf 'resolved=%s|%s\n' "$ss_basic_server" "$ss_basic_server_ip"
-'''
-                code = "ANSWER=" + __import__("shlex").quote(address_line) + "\n" + code
-                result = self.shell(code)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn("mapped.example.test|119.29.29.29", result.stdout)
-                self.assertIn("resolved=203.0.113.7|203.0.113.7", result.stdout)
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("unexpected-DNS-fragment", result.stdout)
+        self.assertIn("resolved=203.0.113.7|203.0.113.7", result.stdout)
+        query = [c for c in self.commands() if c[0] == "ss-https-probe"]
+        self.assertEqual(query[0][1:5], ["-resolve", "mapped.example.test", "-dns", "192.0.2.53:7874"])
+
+    def test_anytls_hostname_containing_ipv4_still_uses_independent_dns(self):
+        mapper = self.base / "embedded-ip-mapper.sh"
+        mapper.write_text('printf 203.0.113.99.edge.example.test\n')
+        body = function("resolv_server_ip").replace("/koolshare/scripts/ss_anytls.sh", str(mapper))
+        body = body.replace("/koolshare/bin/ss-https-probe", str(self.bin / "ss-https-probe"))
+        body = body.replace("/tmp/ss_host.conf", str(self.base / "ss_host.conf"))
+        result = self.shell(body + r'''
+ss_basic_type=4; ss_basic_trojan_binary=AnyTLS; ss_basic_server=original.example.test
+echo_date() { :; }
+get_server_resolver() { printf https://dns.example.test/query; }
+close_in_five() { exit 17; }
+ss_dns_write_server_config() { exit 18; }
+resolv_server_ip
+printf 'resolved=%s\n' "$ss_basic_server"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('resolved=203.0.113.7', result.stdout)
+        queries = [c for c in self.commands() if c[0] == 'ss-https-probe']
+        self.assertEqual(queries[0][1:5], ['-resolve','203.0.113.99.edge.example.test','-dns','https://dns.example.test/query'])
 
     def test_anytls_bootstrap_does_not_fall_back_to_proxy_dependent_dns(self):
         mapper = self.base / "mapper.sh"
         mapper.write_text('printf mapped.example.test\n')
         body = function("resolv_server_ip").replace("/koolshare/scripts/ss_anytls.sh", str(mapper))
+        body = body.replace("/koolshare/bin/ss-https-probe", str(self.bin / "ss-https-probe"))
+        self.initial["bootstrap_dns_fail"] = True
+        self.write_state(self.initial)
         result = self.shell(body + r'''
 ss_basic_type=4; ss_basic_trojan_binary=AnyTLS; ss_basic_server=original.example.test
 echo_date() { :; }
-get_server_resolver() { printf 119.29.29.29; }
+get_server_resolver() { printf 192.0.2.53:7874; }
 close_in_five() { exit 17; }
 ss_dns_write_server_config() { :; }
-nslookup() { printf 'Server: resolver\nAddress: 119.29.29.29\n\nName: mapped.example.test\n'; }
+nslookup() { exit 18; }
 resolveip() { exit 19; }
 resolv_server_ip
 ''')
@@ -211,6 +244,72 @@ resolv_server_ip
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, "02:AA:00:00:00:01|02:AA:00:00:00:02")
 
+    def test_uu_tcp_policy_defaults_to_gfwlist_and_accepts_only_named_policies(self):
+        for policy, target in [("", "SHADOWSOCKS_GFW"), ("gfwlist", "SHADOWSOCKS_GFW"),
+                               ("foreign", "SHADOWSOCKS_CHN"), ("direct", "RETURN")]:
+            with self.subTest(policy=policy):
+                self.initial["dbus"]["ss_basic_uu_tcp_policy"] = policy
+                self.write_state(self.initial)
+                result = self.shell('ss_routing_load_bypass_macs && ss_routing_uu_target_chain')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), target)
+        for invalid in ["invalid", "GFWLIST", "foreign; touch /tmp/should-not-run", "$(touch /tmp/should-not-run)"]:
+            with self.subTest(invalid=invalid):
+                self.initial["dbus"]["ss_basic_uu_tcp_policy"] = invalid
+                self.write_state(self.initial)
+                self.assertNotEqual(self.shell('ss_routing_load_bypass_macs').returncode, 0)
+
+    def test_uu_foreign_policy_keeps_domestic_direct_overseas_proxy_option(self):
+        self.initial["tables"]["nat"]["SHADOWSOCKS"] = []
+        self.initial["neighbours"] = ['192.168.50.34 lladdr 02:00:00:00:00:02 REACHABLE']
+        self.write_state(self.initial)
+        result = self.shell('SS_ROUTING_UU_MACS="02:00:00:00:00:02"; SS_ROUTING_UU_TCP_POLICY=foreign; ss_routing_add_uu_tcp_routes')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rules = json.loads(self.state.read_text())["tables"]["nat"]["SHADOWSOCKS"]
+        self.assertEqual(rules, [["-p", "tcp", "-m", "mac", "--mac-source", "02:00:00:00:00:02", "-g", "SHADOWSOCKS_CHN"]])
+
+    def test_uu_direct_policy_removes_only_owned_exception_and_keeps_uu_game_rules(self):
+        mac, other, goto = self.uu_tcp_policy_fixture()
+        set_name = 'fssuu_020000000002'
+        set_return = ["-p", "tcp", "-m", "mac", "--mac-source", mac, "-m", "set", "--match-set", set_name, "dst", "-j", "RETURN"]
+        self.initial["tables"]["nat"]["SHADOWSOCKS"] = [other, set_return, goto]
+        dnat = ["-s", "192.168.50.34/32", "-i", "br0", "-p", "tcp", "--dport", "3074", "-j", "DNAT", "--to-destination", "10.1.1.1:3074"]
+        terminal = ["-s", "192.168.50.34/32", "-i", "br0", "-j", "RETURN"]
+        scoped = ["-i", "br0", "-p", "tcp", "-m", "mac", "--mac-source", mac, "-j", "SHADOWSOCKS"]
+        global_jump = ["-p", "tcp", "-j", "SHADOWSOCKS"]
+        self.initial["tables"]["nat"]["PREROUTING"] = [dnat, scoped, terminal, global_jump]
+        self.initial["sets"] = {set_name: ['1.2.3.0/24'], 'UU_OTHER': ['10.0.0.0/8']}
+        self.write_state(self.initial)
+        result = self.shell(f'SS_ROUTING_UU_MACS="{mac}"; SS_ROUTING_UU_TCP_POLICY=direct; ss_routing_reconcile_uu; ss_routing_reconcile_uu')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state["tables"]["nat"]["SHADOWSOCKS"], [other, ["-p", "tcp", "-m", "mac", "--mac-source", mac, "-j", "RETURN"]])
+        self.assertEqual(state["tables"]["nat"]["PREROUTING"], [dnat, terminal, global_jump])
+        self.assertEqual(state['sets'], {'UU_OTHER': ['10.0.0.0/8']})
+        self.assertEqual(state['rule_output'], self.initial['rule_output'])
+        self.assertFalse(any(cmd[0] == 'iptables' and '-F' in cmd for cmd in self.commands()))
+
+    def test_uu_reconcile_switches_gfwlist_foreign_direct_without_stale_owned_gotos(self):
+        mac, other, _ = self.uu_tcp_policy_fixture()
+        dnat = ["-s", "192.168.50.34/32", "-i", "br0", "-p", "tcp", "--dport", "3074", "-j", "DNAT", "--to-destination", "10.1.1.1:3074"]
+        terminal = ["-s", "192.168.50.34/32", "-i", "br0", "-j", "RETURN"]
+        self.initial["tables"]["nat"]["PREROUTING"] = [dnat, terminal]
+        self.write_state(self.initial)
+        for policy, target in [('foreign', 'SHADOWSOCKS_CHN'), ('gfwlist', 'SHADOWSOCKS_GFW'),
+                               ('direct', None), ('gfwlist', 'SHADOWSOCKS_GFW')]:
+            with self.subTest(policy=policy):
+                result = self.shell(f'SS_ROUTING_UU_MACS="{mac}"; SS_ROUTING_UU_TCP_POLICY={policy}; ss_routing_reconcile_uu')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                state = json.loads(self.state.read_text())
+                rules = state['tables']['nat']['SHADOWSOCKS']
+                gotos = [rule for rule in rules if '--mac-source' in rule and mac in rule and '-g' in rule]
+                self.assertEqual([rule[-1] for rule in gotos], [target] if target else [])
+                self.assertEqual(rules[0], other)
+                self.assertEqual(state['tables']['nat']['PREROUTING'][0], dnat)
+                self.assertIn(terminal, state['tables']['nat']['PREROUTING'])
+                scoped = [rule for rule in state['tables']['nat']['PREROUTING'] if '--mac-source' in rule and mac in rule]
+                self.assertEqual(len(scoped), 1 if target else 0)
+
     def test_invalid_backend_input_is_rejected_before_legacy_eval(self):
         self.initial["dbus"]["ss_basic_bypass_macs"] = "$(touch /tmp/should-not-run)"
         self.write_state(self.initial)
@@ -219,6 +318,15 @@ resolv_server_ip
         self.assertNotEqual(r.returncode, 0)
         self.assertFalse(any(c[:2] == ["dbus", "export"] for c in self.commands()))
         self.assertFalse(any(c[0] == "iptables" for c in self.commands()))
+
+    def test_invalid_uu_policy_is_rejected_before_legacy_eval(self):
+        self.initial["dbus"]["ss_basic_uu_tcp_policy"] = "$(touch /tmp/should-not-run)"
+        self.write_state(self.initial)
+        clone = SOURCE.replace(". /koolshare/scripts/ss_routing.sh", '. "' + str(HELPER) + '"', 1)
+        result = self.shell(clone)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(command[:2] == ["dbus", "export"] for command in self.commands()))
+        self.assertFalse(any(command[0] == "iptables" for command in self.commands()))
 
     def test_output_cleanup_preserves_unrelated_rules_and_is_idempotent(self):
         foreign = [["-p", "udp", "-j", "UU_OUTPUT"], ["-p", "tcp", "--dport", "443", "-j", "MY_SHADOWSOCKS_EXT"], ["-p", "tcp", "-j", "REDIRECT", "--to-ports", "10999"]]
@@ -297,7 +405,7 @@ resolv_server_ip
         nat = state["tables"]["nat"]
         self.assertEqual(nat["PREROUTING"][:2], foreign)
         self.assertEqual(nat["PREROUTING"][2], ["-p", "tcp", "-j", "SHADOWSOCKS"])
-        profile = next(rule for rule in nat["SHADOWSOCKS"] if rule[-2:] == ["-g", "SHADOWSOCKS_CHN"])
+        profile = next(rule for rule in nat["SHADOWSOCKS"] if rule[-2:] == ["-g", "SHADOWSOCKS_GFW"])
         self.assertIn("02:00:00:00:00:02", profile)
         self.assertNotIn("--dport", profile)
         self.assertNotIn("--dports", profile)
@@ -307,7 +415,7 @@ resolv_server_ip
 
     def test_uu_device_return_keeps_prior_dnat_then_mac_scoped_tcp_exception(self):
         mac = "02:00:00:00:00:02"
-        self.initial["tables"]["nat"]["SHADOWSOCKS"] = [["-p", "tcp", "-m", "mac", "--mac-source", mac, "-g", "SHADOWSOCKS_CHN"]]
+        self.initial["tables"]["nat"]["SHADOWSOCKS"] = [["-p", "tcp", "-m", "mac", "--mac-source", mac, "-g", "SHADOWSOCKS_GFW"]]
         dnat = ["-s", "192.168.50.34/32", "-i", "br0", "-p", "tcp", "--dport", "3074", "-j", "DNAT", "--to-destination", "10.1.1.1:3074"]
         terminal = ["-s", "192.168.50.34/32", "-i", "br0", "-j", "RETURN"]
         other = ["-s", "192.168.50.99/32", "-i", "br0", "-j", "RETURN"]
@@ -326,7 +434,7 @@ resolv_server_ip
 
     def test_uu_exception_relocates_after_dhcp_change_and_uses_lease_fallback(self):
         mac = "02:00:00:00:00:02"
-        self.initial["tables"]["nat"]["SHADOWSOCKS"] = [["-p", "tcp", "-m", "mac", "--mac-source", mac, "-g", "SHADOWSOCKS_CHN"]]
+        self.initial["tables"]["nat"]["SHADOWSOCKS"] = [["-p", "tcp", "-m", "mac", "--mac-source", mac, "-g", "SHADOWSOCKS_GFW"]]
         lease = self.base / "leases"
         lease.write_text(f"9999999999 {mac.lower()} 192.168.50.77 console *\n")
         cloned = self.base / "routing.sh"
@@ -344,7 +452,7 @@ resolv_server_ip
 
     def test_uu_reconcile_repairs_background_rebuild_and_duplicate_jumps_only(self):
         mac = "02:00:00:00:00:02"
-        self.initial["tables"]["nat"]["SHADOWSOCKS"] = [["-p", "tcp", "-m", "mac", "--mac-source", mac, "-g", "SHADOWSOCKS_CHN"]]
+        self.initial["tables"]["nat"]["SHADOWSOCKS"] = [["-p", "tcp", "-m", "mac", "--mac-source", mac, "-g", "SHADOWSOCKS_GFW"]]
         scoped = ["-i", "br0", "-p", "tcp", "-m", "mac", "--mac-source", mac, "-j", "SHADOWSOCKS"]
         game = ["-s", "192.168.50.34/32", "-i", "br0", "-p", "tcp", "--dport", "3074", "-j", "UU_GAME"]
         terminal = ["-s", "192.168.50.34/32", "-i", "br0", "-j", "RETURN"]
@@ -362,7 +470,7 @@ resolv_server_ip
 
     def test_uu_reconcile_skips_missing_mapping_and_cleans_removed_profile(self):
         mac = "02:00:00:00:00:02"
-        self.initial["tables"]["nat"]["SHADOWSOCKS"] = [["-p", "tcp", "-m", "mac", "--mac-source", mac, "-g", "SHADOWSOCKS_CHN"]]
+        self.initial["tables"]["nat"]["SHADOWSOCKS"] = [["-p", "tcp", "-m", "mac", "--mac-source", mac, "-g", "SHADOWSOCKS_GFW"]]
         scoped = ["-i", "br0", "-p", "tcp", "-m", "mac", "--mac-source", mac, "-j", "SHADOWSOCKS"]
         terminal = ["-s", "192.168.50.34/32", "-i", "br0", "-j", "RETURN"]
         self.initial["tables"]["nat"]["PREROUTING"] = [scoped, terminal]
@@ -379,7 +487,7 @@ resolv_server_ip
         code += '\ncru(){ printf "%s\\n" "$*"; }; sed(){ :; }; echo_date(){ :; }; SS_ROUTING_UU_MACS="02:00:00:00:00:02"; write_cron_job; kill_cron_job'
         result = self.shell(code)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("a ss_uu_coexist * * * * * /koolshare/scripts/ss_routing.sh reconcile-uu", result.stdout)
+        self.assertIn("a ss_uu_coexist * * * * * /koolshare/scripts/ss_routing.sh watch-uu", result.stdout)
         self.assertNotIn("uuplugin", result.stdout)
 
     def test_uu_cron_respects_disabled_state_and_nonblocking_core_lock(self):
@@ -401,10 +509,28 @@ resolv_server_ip
         self.assertIn(["ss-flock", "-n", "7"], self.commands())
         self.assertFalse(any(cmd[0] == "iptables" for cmd in self.commands()))
 
+    def test_uu_cron_cannot_restore_proxy_hooks_during_direct_protection(self):
+        self.initial["dbus"]["ss_basic_enable"] = "1"
+        self.write_state(self.initial)
+        mode = self.base / "failover-mode"
+        code = HELPER.read_text().replace("/var/lock/koolss.lock", str(self.base / "core.lock"))
+        code = code.replace("/tmp/ss_failover/mode", str(mode))
+        code = code.replace("PATH=/koolshare/bin:/usr/sbin:/usr/bin:/sbin:/bin", "PATH=" + str(self.bin) + ":" + os.environ["PATH"])
+        code = code.replace("/koolshare/bin/ss-flock", str(self.bin / "ss-flock"))
+        clone = self.base / "protected-reconcile.sh"
+        clone.write_text(code)
+        env = dict(os.environ, PATH=str(self.bin) + ":" + os.environ["PATH"], MOCK_STATE=str(self.state), MOCK_LOG=str(self.log))
+        for value in ["direct", "error"]:
+            mode.write_text(value + "\n")
+            if self.log.exists(): self.log.unlink()
+            result = subprocess.run(["/bin/sh", str(clone), "reconcile-uu"], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(any(cmd[0] in ["iptables", "ip", "ipset"] for cmd in self.commands()))
+
     def uu_tcp_policy_fixture(self):
         mac = "02:00:00:00:00:02"
         other = ["-p", "tcp", "-m", "mac", "--mac-source", "02:00:00:00:00:01", "-j", "RETURN"]
-        goto = ["-p", "tcp", "-m", "mac", "--mac-source", mac, "-g", "SHADOWSOCKS_CHN"]
+        goto = ["-p", "tcp", "-m", "mac", "--mac-source", mac, "-g", "SHADOWSOCKS_GFW"]
         self.initial["tables"]["nat"]["SHADOWSOCKS"] = [other, goto]
         self.initial["neighbours"] = [f"192.168.50.34 lladdr {mac} REACHABLE"]
         self.initial["rule_output"] = [
@@ -460,7 +586,7 @@ resolv_server_ip
         self.assertEqual(updated["rule_output"], state["rule_output"])
         self.assertEqual(updated["routes"], state["routes"])
 
-    def test_uu_tcp_read_and_atomic_update_failures_keep_full_mac_guard(self):
+    def test_uu_tcp_read_and_atomic_update_failures_keep_existing_set_guard(self):
         mac, other, goto = self.uu_tcp_policy_fixture()
         code = f'SS_ROUTING_UU_MACS="{mac}"; ss_routing_update_uu_tcp_bypasses'
         self.assertEqual(self.shell(code).returncode, 0)
@@ -484,11 +610,30 @@ resolv_server_ip
                 state = json.loads(self.state.read_text())
                 rules = state["tables"]["nat"]["SHADOWSOCKS"]
                 self.assertEqual(rules[0], other)
-                self.assertEqual(rules[1], ["-p", "tcp", "-m", "mac", "--mac-source", mac, "-j", "RETURN"])
+                self.assertEqual(rules[1], baseline["tables"]["nat"]["SHADOWSOCKS"][1])
                 self.assertEqual(rules[2], goto)
                 self.assertEqual(state["sets"]["fssuu_020000000002"], baseline["sets"]["fssuu_020000000002"])
 
-    def test_uu_inactive_with_known_mac_ip_keeps_youtube_proxy_but_claimed_empty_stays_safe(self):
+    def test_uu_refresh_keeps_active_rule_until_atomic_swap_without_whole_tcp_guard(self):
+        mac, _, _ = self.uu_tcp_policy_fixture()
+        code = f'SS_ROUTING_UU_MACS="{mac}"; ss_routing_update_uu_tcp_bypasses'
+        self.assertEqual(self.shell(code).returncode, 0)
+        self.log.unlink()
+        self.assertEqual(self.shell(code).returncode, 0)
+        commands = self.commands()
+        self.assertTrue(any(c[:2] == ['ipset', 'swap'] for c in commands))
+        self.assertFalse(any(c[0] == 'iptables' and any(op in c for op in ['-I', '-R']) for c in commands))
+        self.assertFalse(any(c[0] == 'iptables' and '-D' in c and '--match-set' in c for c in commands))
+
+    def test_uu_first_failed_discovery_still_installs_conservative_guard(self):
+        mac, other, goto = self.uu_tcp_policy_fixture()
+        self.initial['rule_read_fail'] = True
+        self.write_state(self.initial)
+        self.assertEqual(self.shell(f'SS_ROUTING_UU_MACS="{mac}"; ss_routing_update_uu_tcp_bypasses').returncode, 0)
+        rules = json.loads(self.state.read_text())['tables']['nat']['SHADOWSOCKS']
+        self.assertEqual(rules, [other, ['-p','tcp','-m','mac','--mac-source',mac,'-j','RETURN'], goto])
+
+    def test_uu_inactive_clears_guards_but_claimed_empty_preserves_last_valid_set(self):
         mac, other, goto = self.uu_tcp_policy_fixture()
         code = f'SS_ROUTING_UU_MACS="{mac}"; ss_routing_update_uu_tcp_bypasses'
         self.assertEqual(self.shell(code).returncode, 0)
@@ -496,12 +641,14 @@ resolv_server_ip
         state["rule_output"] = ["0: from all lookup local", "32765: from 192.168.50.34 fwmark 1 lookup 163"]
         self.write_state(state)
         self.assertEqual(self.shell(code).returncode, 0)
-        self.assertEqual(json.loads(self.state.read_text())["tables"]["nat"]["SHADOWSOCKS"], [other, goto])
+        inactive = json.loads(self.state.read_text())
+        self.assertEqual(inactive["tables"]["nat"]["SHADOWSOCKS"], [other, goto])
+        self.assertNotIn('fssuu_020000000002', inactive['sets'])
         state["tables"]["nat"]["PREROUTING"] = [["-s", "192.168.50.34/32", "-i", "br0", "-j", "RETURN"]]
         self.write_state(state)
         self.assertEqual(self.shell(code).returncode, 0)
         rules = json.loads(self.state.read_text())["tables"]["nat"]["SHADOWSOCKS"]
-        self.assertEqual(rules[1], ["-p", "tcp", "-m", "mac", "--mac-source", mac, "-j", "RETURN"])
+        self.assertEqual(rules[1], state['tables']['nat']['SHADOWSOCKS'][1])
         self.assertEqual(rules[2], goto)
 
     def test_uu_owned_set_cleanup_leaves_other_sets(self):
@@ -525,6 +672,116 @@ resolv_server_ip
         result = self.shell(f'SS_ROUTING_UU_MACS="{mac}"; ss_routing_reconcile_uu')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(self.state.read_text())["tables"]["nat"]["PREROUTING"], [terminal])
+
+    def test_uu_interval_defaults_and_bounds_are_validated_without_eval(self):
+        for value, expected in [('', '5'), ('2', '2'), ('5', '5'), ('30', '30')]:
+            self.initial['dbus']['ss_basic_uu_interval'] = value
+            self.write_state(self.initial)
+            result = self.shell('ss_routing_load_bypass_macs && printf "%s" "$SS_ROUTING_UU_INTERVAL"')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, expected)
+        for value in ['1', '31', '-2', '2.5', '5;touch marker', ' 5', '99999']:
+            self.initial['dbus']['ss_basic_uu_interval'] = value
+            self.write_state(self.initial)
+            self.assertNotEqual(self.shell('ss_routing_load_bypass_macs').returncode, 0)
+
+    def test_watch_digest_detects_game_route_change_without_rule_change(self):
+        mac, _, _ = self.uu_tcp_policy_fixture()
+        code = f'SS_ROUTING_UU_MACS="{mac}"; SS_ROUTING_BYPASS_MACS=; SS_ROUTING_UU_TCP_POLICY=foreign; ss_routing_watch_digest'
+        first = self.shell(code)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertRegex(first.stdout, r'^[0-9a-f]{32}\n$')
+        self.assertEqual(self.shell(code).stdout, first.stdout)
+        self.initial['routes']['179'].append('203.0.113.7/32 dev tun163')
+        self.write_state(self.initial)
+        self.assertNotEqual(self.shell(code).stdout, first.stdout)
+        self.assertFalse(any(c[0]=='ipset' for c in self.commands()))
+
+    def watch_clone(self):
+        code = HELPER.read_text().replace('/var/lock/koolss.lock', str(self.base/'core.lock'))
+        code = code.replace('/tmp/ss_failover/mode', str(self.base/'mode'))
+        code = code.replace('PATH=/koolshare/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'PATH='+str(self.bin)+':'+os.environ['PATH'])
+        code = code.replace('/koolshare/bin/ss-flock', str(self.bin/'ss-flock'))
+        clone = self.base/'watch-helper.sh';clone.write_text(code)
+        return clone
+
+    def watch_env(self):
+        return dict(os.environ, PATH=str(self.bin)+':'+os.environ['PATH'], MOCK_STATE=str(self.state),
+                    MOCK_LOG=str(self.log), SS_ROUTING_WATCH_STATE=str(self.base/'watch-state'),
+                    SS_ROUTING_WATCH_FLOCK=str(self.bin/'ss-flock'))
+
+    def test_watch_only_reconciles_changed_digest_and_hot_reads_interval_without_child_locks(self):
+        clone = self.watch_clone();control = self.base/'control';control.mkdir()
+        (control/'run').touch();(control/'snapshot').write_text('first');(control/'interval').write_text('5')
+        body = r'''
+. "$1"
+control=$2
+ss_routing_watch_allowed(){ [ -f "$control/run" ]; }
+ss_routing_load_bypass_macs(){ SS_ROUTING_UU_MACS=02:00:00:00:00:02; SS_ROUTING_UU_INTERVAL=$(cat "$control/interval"); }
+ss_routing_watch_snapshot(){ cat "$control/snapshot"; }
+ss_routing_reconcile_uu(){
+  if (: >&6) 2>/dev/null || (: >&7) 2>/dev/null; then echo inherited-lock >> "$control/errors"; fi
+  echo refresh >> "$control/refreshes"
+}
+sleep(){
+  if (: >&6) 2>/dev/null || (: >&7) 2>/dev/null; then echo inherited-lock >> "$control/errors"; fi
+  echo "$1" >> "$control/sleeps"
+  n=$(wc -l < "$control/sleeps" | tr -d ' ')
+  case "$n" in 1) echo 2 > "$control/interval" ;; 2) echo second > "$control/snapshot" ;; 4) rm "$control/run" ;; esac
+}
+ss_routing_watch
+'''
+        result = subprocess.run(['/bin/bash','-c',body,'watch-test',str(clone),str(control)],
+                                env=self.watch_env(),capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((control/'refreshes').read_text().splitlines(), ['refresh','refresh'])
+        self.assertEqual((control/'sleeps').read_text().splitlines(), ['5','2','2','2'])
+        self.assertFalse((control/'errors').exists())
+        state=self.base/'watch-state'
+        self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((state/'digest').stat().st_mode & 0o777, 0o600)
+        self.assertFalse((state/'pid').exists())
+        self.assertIn(['ss-flock','-u','6'], self.commands())
+
+    def test_watch_singleton_releases_lock_on_signal_and_sleep_holds_no_lock(self):
+        import fcntl
+        clone = self.watch_clone()
+        body = r'''
+. "$1"
+ss_routing_watch_allowed(){ return 0; }
+ss_routing_load_bypass_macs(){ SS_ROUTING_UU_MACS=02:00:00:00:00:02; SS_ROUTING_UU_INTERVAL=2; }
+ss_routing_watch_snapshot(){ printf stable; }
+ss_routing_reconcile_uu(){ :; }
+sleep(){ /bin/sleep 0.1; }
+ss_routing_watch
+'''
+        args=['/bin/bash','-c',body,'watch-test',str(clone)]
+        first=subprocess.Popen(args,env=self.watch_env(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        try:
+            pidfile=self.base/'watch-state/pid';deadline=time.monotonic()+3
+            while not pidfile.exists() and time.monotonic()<deadline:time.sleep(0.01)
+            self.assertTrue(pidfile.exists())
+            pid=pidfile.read_text()
+            second=subprocess.run(args,env=self.watch_env(),capture_output=True,text=True,timeout=3)
+            self.assertEqual(second.returncode,0,second.stderr)
+            self.assertEqual(pidfile.read_text(),pid)
+            first.terminate();first.communicate(timeout=3)
+            self.assertFalse(pidfile.exists())
+            with (self.base/'watch-state/lock').open('w') as lock:
+                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        finally:
+            if first.poll() is None:first.kill();first.communicate()
+
+    def test_watch_exits_without_snapshot_or_routes_when_disabled_or_direct(self):
+        clone=self.watch_clone()
+        for enabled,mode in [('0','proxy'),('1','direct'),('1','error')]:
+            self.initial['dbus']['ss_basic_enable']=enabled;self.write_state(self.initial)
+            (self.base/'mode').write_text(mode)
+            if self.log.exists():self.log.unlink()
+            result=subprocess.run(['/bin/sh',str(clone),'watch-uu'],env=self.watch_env(),capture_output=True,text=True,timeout=3)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertFalse(any(c[0] in ['iptables','ip','ipset'] for c in self.commands()))
+            self.assertFalse((self.base/'watch-state').exists())
 
 
 if __name__ == "__main__":

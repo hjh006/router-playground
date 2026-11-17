@@ -4,6 +4,7 @@ KS_ROOT=${SS_HEALTH_KOOLSHARE:-/koolshare}
 STATE_DIR=${SS_HEALTH_STATE:-/tmp/ss_health}
 PUBLIC_JSON=${SS_HEALTH_JSON:-/tmp/ss_health.json}
 FLOCK="$KS_ROOT/bin/ss-flock"
+HTTPS_PROBE="$KS_ROOT/bin/ss-https-probe"
 [ -x "$FLOCK" ] || { printf '%s\n' 'Health prerequisite missing: ss-flock' >&2; exit 1; }
 PATH="$KS_ROOT/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 export PATH
@@ -17,7 +18,18 @@ chmod 700 "$STATE_DIR"
 # Never unlink lock files: flock ownership belongs to the open file description.
 exec 8> "$STATE_DIR/commit.lock"
 exec 9> "$STATE_DIR/probe.lock"
-trap 'rm -f "$STATE_DIR/targets.$$" "$STATE_DIR/latencies.$$" "$STATE_DIR/history.$$" "$STATE_DIR/state.$$"' EXIT
+finish() {
+  result=$?
+  trap - 0 HUP INT TERM
+  # Explicit unlock matters when descendants outlive the shell: the private
+  # helper locks inherited open-file descriptions, not process-local handles.
+  "$FLOCK" -u 8 >/dev/null 2>&1 || :
+  "$FLOCK" -u 9 >/dev/null 2>&1 || :
+  exec 8>&- 9>&-
+  rm -f "$STATE_DIR/targets.$$" "$STATE_DIR/latencies.$$" "$STATE_DIR/history.$$" "$STATE_DIR/state.$$"
+  exit "$result"
+}
+trap finish EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -65,7 +77,9 @@ case "${1:-refresh}" in
     [ "$1" = stop ] && enabled=false
     initial
     "$FLOCK" -u 8
-    [ "$1" = reset ] && "$0" refresh >/dev/null 2>&1 &
+    if [ "$1" = reset ]; then
+      "$0" refresh 8>&- 9>&- >/dev/null 2>&1 &
+    fi
     exit 0
     ;;
 esac
@@ -99,9 +113,16 @@ fi
 
 probe() {
   id="$1" label="$2" url="$3" method="$4"
-  set -- curl --cacert "$KS_ROOT/ss/rules/cacert.pem" --socks5-hostname 127.0.0.1:23456 --connect-timeout "$CONNECT_TIMEOUT" --max-time "$PROBE_TIMEOUT" -sS -o /dev/null --write-out '%{http_code}|%{time_total}'
-  [ "$method" = HEAD ] && set -- "$@" -I
-  metrics=$("$@" "$url" 2>/dev/null)
+  if [ -x "$HTTPS_PROBE" ]; then
+    set -- "$HTTPS_PROBE" -proxy 127.0.0.1:23456 -ca "$KS_ROOT/ss/rules/cacert.pem" \
+      -target "$id" -timeout "${PROBE_TIMEOUT}s" -format curl
+  else
+    # Only absence selects the legacy backend; never retry a TLS failure via
+    # another implementation or disable destination certificate verification.
+    set -- curl --cacert "$KS_ROOT/ss/rules/cacert.pem" --socks5-hostname 127.0.0.1:23456 --connect-timeout "$CONNECT_TIMEOUT" --max-time "$PROBE_TIMEOUT" -sS -o /dev/null --write-out '%{http_code}|%{time_total}' "$url"
+    [ "$method" = HEAD ] && set -- "$@" -I
+  fi
+  metrics=$("$@" 8>&- 9>&- 2>/dev/null)
   rc=$?
   http=${metrics%%|*} seconds=${metrics#*|}
   case "$http" in [0-9][0-9][0-9]) ;; *) http=000 ;; esac
@@ -120,7 +141,7 @@ probe() {
     28) state=timeout ;;
     6) state=dns_error ;;
     35|51|60) state=tls_error ;;
-    58|59|77) state=local_error ;;
+    2|58|59|77|126|127) state=local_error ;;
   esac
   [ "$state" = ok ] && [ "$latency" != null ] && echo "$latency" >> "$STATE_DIR/latencies.$$"
   printf '{"id":"%s","label":"%s","state":"%s","latency_ms":%s,"http_code":%s}\n' "$id" "$label" "$state" "$latency" "$((http+0))" >> "$STATE_DIR/targets.$$"

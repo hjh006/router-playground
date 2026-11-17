@@ -1,5 +1,6 @@
 import os
 import re
+import shlex
 from pathlib import Path
 import stat
 import subprocess
@@ -34,6 +35,157 @@ class DnsHookTests(unittest.TestCase):
 
     def shell(self, command):
         return subprocess.run(["/bin/sh", "-c", '. "$1"\n' + command, "hook-test", str(self.helper)], capture_output=True, text=True)
+
+    def test_sourcing_helper_and_normalizing_resolver_are_pure(self):
+        before = set(self.base.rglob("*"))
+        original = self.conf_add.read_bytes()
+        result = self.shell('ss_dns_normalize_resolver "192.0.2.1:7874"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "192.0.2.1:7874\n")
+        self.assertEqual(set(self.base.rglob("*")), before)
+        self.assertEqual(self.conf_add.read_bytes(), original)
+
+    def test_resolver_normalization_returns_explicit_canonical_port(self):
+        cases = {
+            "192.0.2.1": "192.0.2.1:53",
+            "192.0.2.1:53": "192.0.2.1:53",
+            "192.0.2.1:00053": "192.0.2.1:53",
+            "198.51.100.254:7874": "198.51.100.254:7874",
+            "203.0.113.1:1": "203.0.113.1:1",
+            "203.0.113.255:65535": "203.0.113.255:65535",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                result = self.shell("ss_dns_normalize_resolver " + shlex.quote(raw))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected + "\n")
+
+    def test_resolver_rejects_nonliteral_ambiguous_and_executable_input(self):
+        marker = self.base / "must-not-exist"
+        cases = [
+            "", " ", "192.0.2.1 ", " 192.0.2.1", "192.0.2.1\t",
+            "192.0.2.1\r", "192.0.2.1\n", "192.0.2.1\n198.51.100.1",
+            "192.0.2.1\x1f", "udp://192.0.2.1:7874", "tcp://192.0.2.1:53",
+            "http://dns.example/dns-query", "dns.example", "192.0.2.1#7874",
+            "192.0.2.1/32", "[::1]:53", "::1", "192.0.2", "192.0.2.1.5",
+            "192..2.1", "192.0.2.256", "192.0.2.-1", "+192.0.2.1",
+            "0192.0.2.1", "192.00.2.1", "192.0.02.1", "192.0.2.01",
+            "0xc0.0.2.1", r"\06192.0.2.1", "192.0.2.1:", "192.0.2.1:0",
+            "192.0.2.1:-1", "192.0.2.1:+53", "192.0.2.1:65536",
+            "192.0.2.1:999999999999999", "192.0.2.1:53:54", "192.0.2.1:5e1",
+            "192.0.2.1:53.0", "192.0.2.1: 53", "192.0.2.1:53\n",
+            "192.0.2.1;touch " + str(marker), "$(touch " + str(marker) + ")",
+            "`touch " + str(marker) + "`",
+        ]
+        for raw in cases:
+            with self.subTest(raw=raw):
+                result = self.shell("ss_dns_normalize_resolver " + shlex.quote(raw))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+        self.assertFalse(marker.exists())
+
+    def test_doh_and_mixed_resolver_lists_preserve_quoted_uri_components(self):
+        cases = {
+            "https://DNS.Example/custom/resolve?key=sample&edns=1":
+                "https://dns.example/custom/resolve?key=sample&edns=1",
+            "https://192.0.2.1:00853/v1/query?value=%2c%23%2F":
+                "https://192.0.2.1:853/v1/query?value=%2c%23%2F",
+            "https://dns.example/": "https://dns.example/",
+            "192.0.2.1,https://DNS.Example/custom?q=a+b&key=sample,198.51.100.1:7874,https://203.0.113.1:443/v2/query":
+                "192.0.2.1:53,https://dns.example/custom?q=a+b&key=sample,198.51.100.1:7874,https://203.0.113.1:443/v2/query",
+        }
+        before = set(self.base.rglob("*"))
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                result = self.shell("ss_dns_normalize_resolver " + shlex.quote(raw))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected + "\n")
+        self.assertEqual(set(self.base.rglob("*")), before)
+
+    def test_bad_doh_urls_and_lists_have_no_partial_output_or_execution(self):
+        marker = self.base / "must-not-exist"
+        cases = [
+            ",192.0.2.1", "192.0.2.1,", "192.0.2.1,,198.51.100.1",
+            ",", "192.0.2.1,192.0.2.2,192.0.2.3,192.0.2.4,192.0.2.5",
+            "192.0.2.1,not-a-resolver", "192.0.2.1,https://dns.example/\n",
+            "https://dns.example/query?list=a,b", "HTTPS://dns.example/query",
+            "http://dns.example/query", "https://dns.example", "https:///query",
+            "https://user@dns.example/query", "https://user:password@dns.example/query",
+            "https://user%40dns.example/query", "https://dns.example/query#fragment",
+            "https://dns.example:/query", "https://dns.example:0/query",
+            "https://dns.example:65536/query", "https://dns.example:-1/query",
+            "https://dns.example:443:53/query", "https://[2001:db8::1]/query",
+            "https://192.0.02.1/query", "https://192.0.2.256/query",
+            "https://dns..example/query", "https://-dns.example/query",
+            "https://dns-.example/query", "https://dns_example/query",
+            "https://dns.example./query", "https://" + "a" * 64 + ".example/query",
+            "https://" + ".".join(["a" * 63] * 4) + "/query",
+            "https://dñs.example/query", "https://dns.example/query?key=has space",
+            "https://dns.example/query\t", "https://dns.example/query\r",
+            "https://dns.example/query\x1f", "https://dns.example/query?bad=%",
+            "https://dns.example/query?bad=%0", "https://dns.example/query?bad=%GG",
+            r"https://dns.example/query\tail", "https://dns.example/query;echo",
+            "https://dns.example/query|echo", "https://dns.example/query>output",
+            "https://dns.example/query?key='quote'", 'https://dns.example/query?key="quote"',
+            "https://dns.example/query{brace}", "https://dns.example/query?key=$(touch " + str(marker) + ")",
+            "https://dns.example/query?key=`touch " + str(marker) + "`",
+        ]
+        for raw in cases:
+            with self.subTest(raw=raw):
+                result = self.shell("ss_dns_normalize_resolver " + shlex.quote(raw))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                # A valid earlier endpoint must not leak on a later failure.
+                result = self.shell("ss_dns_normalize_resolver " + shlex.quote("198.51.100.1," + raw))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+        self.assertFalse(marker.exists())
+
+    def test_doh_and_lists_cannot_be_written_as_legacy_udp_fragments(self):
+        output = self.temp / "fancyss-server.conf"
+        link = self.jffs / "configs/dnsmasq.d/fancyss-server.conf"
+        output.write_text("server=/existing.example/192.0.2.1#53\n")
+        link.symlink_to(output)
+        original = output.read_bytes()
+        for raw in ["https://dns.example/custom?key=sample&edns=1",
+                    "192.0.2.1,198.51.100.1:7874",
+                    "192.0.2.1,https://dns.example/query"]:
+            with self.subTest(raw=raw):
+                result = self.shell("ss_dns_write_server_config node.example " + shlex.quote(raw))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(output.read_bytes(), original)
+                self.assertEqual(link.resolve(), output.resolve())
+
+    def test_server_fragment_uses_requested_port_without_changing_other_dns(self):
+        before = self.conf_add.read_bytes()
+        output = self.temp / "fancyss-server.conf"
+        link = self.jffs / "configs/dnsmasq.d/fancyss-server.conf"
+        for resolver, expected in [
+            ("192.0.2.1", "server=/node.example/192.0.2.1#53\n"),
+            ("192.0.2.1:53", "server=/node.example/192.0.2.1#53\n"),
+            ("192.0.2.1:00053", "server=/node.example/192.0.2.1#53\n"),
+            ("198.51.100.1:7874", "server=/node.example/198.51.100.1#7874\n"),
+            ("203.0.113.1:65535", "server=/node.example/203.0.113.1#65535\n"),
+        ]:
+            with self.subTest(resolver=resolver):
+                result = self.shell("ss_dns_write_server_config node.example " + shlex.quote(resolver))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output.read_text(), expected)
+                self.assertTrue(link.is_symlink())
+                self.assertEqual(link.resolve(), output.resolve())
+                self.assertEqual(self.conf_add.read_bytes(), before)
+
+    def test_invalid_resolver_preserves_existing_server_fragment(self):
+        output = self.temp / "fancyss-server.conf"
+        link = self.jffs / "configs/dnsmasq.d/fancyss-server.conf"
+        output.write_text("server=/existing.example/192.0.2.1\n")
+        link.symlink_to(output)
+        original = output.read_bytes()
+        result = self.shell("ss_dns_write_server_config node.example 'udp://198.51.100.1:7874'")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(output.read_bytes(), original)
+        self.assertEqual(link.resolve(), output.resolve())
 
     def test_unknown_hook_is_chained_once_and_restored_exactly(self):
         original = '#!/bin/sh\nprintf "previous:%s:%s\\n" "$0" "$1" >> "$1"\n'
@@ -148,6 +300,33 @@ class DnsHookTests(unittest.TestCase):
         content = config.read_text()
         self.assertTrue(content.startswith(original))
         self.assertEqual(content.splitlines().count("no-resolv"), 1)
+
+    def test_uu_dns_flags_follow_the_selected_tcp_policy(self):
+        source = (ROOT / "ss/rules/dnsmasq.postconf").read_text().split('ISP_DNS1=', 1)[0]
+        source = source.replace('source /usr/sbin/helper.sh', '')
+        route_helper = Path(os.environ.get('SS_DNS_ROUTING_HELPER', ROOT / 'scripts/ss_routing.sh'))
+        source = source.replace('/koolshare/scripts/ss_routing.sh', str(route_helper))
+        mock = r'''
+dbus() {
+  case "$1:$2" in
+    get:ss_basic_mode) printf '1\n' ;;
+    get:ss_basic_uu_macs) printf '02:00:00:00:00:02\n' ;;
+    get:ss_basic_uu_tcp_policy) printf '%s\n' "$POLICY" ;;
+    list:ss_acl_mode_) [ -z "$ACL_MODE" ] || printf 'ss_acl_mode_1=%s\n' "$ACL_MODE" ;;
+    *) : ;;
+  esac
+}
+'''
+        for policy, acl, expected in [('', '', '1|'), ('gfwlist', '', '1|'),
+                                      ('foreign', '', '|1'), ('direct', '', '|'),
+                                      ('direct', '2', '|2')]:
+            with self.subTest(policy=policy, acl=acl):
+                code = 'POLICY=' + shlex.quote(policy) + '; ACL_MODE=' + shlex.quote(acl) + '\n'
+                code += mock + source + '\nprintf "%s|%s" "$gfw_on" "$chn_on"\n'
+                result = subprocess.run(['/bin/bash', '-c', code, 'dns-flags', 'unused.conf'],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected)
 
 
 if __name__ == "__main__":
